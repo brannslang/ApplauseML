@@ -7,7 +7,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import pandas as pd
 
-from model.predict import artifacts_exist, get_risk_tables
+from model.predict import artifacts_exist, get_risk_tables, get_customer_list, get_customer_risk_tables
 
 st.set_page_config(page_title="Risk Dashboard — ApplauseML", page_icon="📊", layout="wide")
 st.title("Risk Dashboard")
@@ -17,13 +17,24 @@ if not artifacts_exist():
     st.error("Model artifacts not found. Run `python model/train.py` first.")
     st.stop()
 
-tables = get_risk_tables()
+# Customer filter
+customers = get_customer_list()
+with st.sidebar:
+    st.header("Filter")
+    customer_options = ["(All Customers)"] + customers
+    selected_customer = st.selectbox("Customer", customer_options)
+
+customer = None if selected_customer == "(All Customers)" else selected_customer
+tables = get_customer_risk_tables(customer)
 baseline = tables["baseline"]
 total = tables["total_bugs"]
 
+if customer:
+    st.info(f"Showing data for **{customer}** only.")
+
 m1, m2 = st.columns(2)
-m1.metric("Overall H/C Baseline Rate", f"{baseline:.1%}")
-m2.metric("Total Bugs in Training Data", f"{total:,}")
+m1.metric("H/C Baseline Rate", f"{baseline:.1%}", help="For the selected customer scope")
+m2.metric("Bugs in Scope", f"{total:,}")
 
 st.divider()
 
@@ -42,6 +53,7 @@ def risk_bar(df: pd.DataFrame, dim_col: str, title: str, top_n: int = 20):
         + plot_df["n_bugs"].astype(str)
         + ")"
     )
+    plot_df["_delta"] = plot_df["hc_rate"] - baseline
     fig = go.Figure(
         go.Bar(
             x=plot_df["hc_rate"],
@@ -50,10 +62,11 @@ def risk_bar(df: pd.DataFrame, dim_col: str, title: str, top_n: int = 20):
             marker_color=plot_df["color"],
             text=plot_df["label"],
             textposition="outside",
+            customdata=plot_df["_delta"].values.reshape(-1, 1),
             hovertemplate=(
                 "<b>%{y}</b><br>"
                 "H/C Rate: %{x:.1%}<br>"
-                f"vs Baseline: baseline<br>"
+                f"vs Baseline ({baseline:.1%}): %{{customdata[0]:+.1%}}<br>"
                 "<extra></extra>"
             ),
         )
@@ -78,25 +91,25 @@ def risk_bar(df: pd.DataFrame, dim_col: str, title: str, top_n: int = 20):
 
 
 tab1, tab2, tab3, tab4 = st.tabs(
-    ["By Component", "By Platform", "By Environment", "By Testing Approach"]
+    ["By Component", "By Platform", "By Environment", "By Testing Type"]
 )
 
 with tab1:
     st.subheader("App Components — Ranked by H/C Rate")
     col_a, col_b = st.columns(2)
     with col_a:
-        st.markdown("**Specific Components**")
+        st.markdown("**By App Component**")
         risk_bar(
             tables.get("App Component", pd.DataFrame()),
             "App Component",
             "High/Critical Rate by App Component",
         )
     with col_b:
-        st.markdown("**Parent Components (High-Level)**")
+        st.markdown("**By Bug Type**")
         risk_bar(
-            tables.get("Parent App Component", pd.DataFrame()),
-            "Parent App Component",
-            "High/Critical Rate by Parent Component",
+            tables.get("Bug Type", pd.DataFrame()),
+            "Bug Type",
+            "High/Critical Rate by Bug Type",
         )
 
 with tab2:
@@ -115,13 +128,13 @@ with tab3:
 
 with tab4:
     risk_bar(
-        tables.get("Testing Approach", pd.DataFrame()),
-        "Testing Approach",
-        "High/Critical Rate by Testing Approach",
+        tables.get("Test Cycle Testing Type", pd.DataFrame()),
+        "Test Cycle Testing Type",
+        "High/Critical Rate by Testing Type",
     )
 
 st.divider()
 st.caption(
     "Red = >50% H/C rate  |  Orange = 35–50%  |  Blue = <35%  |  "
-    "Dashed line = overall baseline. Minimum 10 bugs per row."
+    "Dashed line = baseline for selected scope. Minimum 10 bugs per row."
 )

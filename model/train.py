@@ -35,7 +35,6 @@ def load_data() -> pd.DataFrame:
         "Test Cycle Id",
         "Test Cycle Testing Type",
         "Test Cycle Duration Activation to Lock/Close/Today",
-        "Testing Approach",
     ]
     df = bugs.merge(cycles[cycle_cols], on="Test Cycle Id", how="left")
 
@@ -47,23 +46,25 @@ def load_data() -> pd.DataFrame:
     return df
 
 
-def compute_risk_tables(df: pd.DataFrame) -> dict:
+RISK_DIMS = [
+    "App Component",
+    "Bug Type",
+    "Platform Product Name",
+    "Development Stage",
+    "Test Cycle Testing Type",
+    "Bug Source Type",
+    "Customer",
+]
+
+
+def _build_risk_tables_for(df: pd.DataFrame) -> dict:
     baseline = df[TARGET].mean()
     tables = {
         "baseline": baseline,
         "total_bugs": len(df),
     }
 
-    risk_dims = [
-        "App Component",
-        "Parent App Component",
-        "Platform Product Name",
-        "Development Stage",
-        "Testing Approach",
-        "Bug Source Type",
-        "Customer",
-    ]
-    for col in risk_dims:
+    for col in RISK_DIMS:
         if col not in df.columns:
             continue
         tbl = (
@@ -77,6 +78,12 @@ def compute_risk_tables(df: pd.DataFrame) -> dict:
             "hc_rate", ascending=False
         )
         tables[col] = tbl
+
+    return tables
+
+
+def compute_risk_tables(df: pd.DataFrame) -> dict:
+    tables = _build_risk_tables_for(df)
 
     date_col = next(
         (c for c in df.columns if "create" in c.lower() and "date" in c.lower()), None
@@ -93,6 +100,15 @@ def compute_risk_tables(df: pd.DataFrame) -> dict:
         monthly["_month"] = monthly["_month"].astype(str)
         monthly = monthly.rename(columns={"_month": "month"})
         tables["monthly_trend"] = monthly
+
+    # Per-customer risk tables for customer-filtered dashboard views
+    if "Customer" in df.columns:
+        customer_tables = {}
+        for cust in df["Customer"].dropna().unique():
+            cust_df = df[df["Customer"] == cust]
+            if len(cust_df) >= MIN_BUGS_FOR_TABLE:
+                customer_tables[cust] = _build_risk_tables_for(cust_df)
+        tables["customer_tables"] = customer_tables
 
     return tables
 

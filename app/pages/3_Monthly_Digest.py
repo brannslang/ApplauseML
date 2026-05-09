@@ -7,7 +7,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import pandas as pd
 
-from model.predict import artifacts_exist, get_risk_tables
+from model.predict import artifacts_exist, get_risk_tables, get_customer_list, get_customer_risk_tables
 
 st.set_page_config(page_title="Monthly Digest — ApplauseML", page_icon="📅", layout="wide")
 st.title("Monthly Digest")
@@ -20,13 +20,14 @@ if not artifacts_exist():
     st.error("Model artifacts not found. Run `python model/train.py` first.")
     st.stop()
 
-tables = get_risk_tables()
-baseline = tables["baseline"]
+# The monthly trend and overall baseline always reflect all-data (model scope)
+all_tables = get_risk_tables()
+baseline = all_tables["baseline"]
 
 st.metric("Overall H/C Baseline Rate (all-time)", f"{baseline:.1%}")
 st.divider()
 
-monthly = tables.get("monthly_trend")
+monthly = all_tables.get("monthly_trend")
 if monthly is not None and not monthly.empty:
     st.subheader("H/C Rate Over Time")
     fig_trend = go.Figure()
@@ -78,9 +79,20 @@ else:
     )
 
 st.divider()
-st.subheader("Top Risk Areas — All Time")
 
-tab1, tab2, tab3 = st.tabs(["Components", "Platforms", "Environments"])
+# Customer filter scopes the risk area tables
+customers = get_customer_list()
+customer_options = ["(All Customers)"] + customers
+selected_customer = st.selectbox("Customer", customer_options, key="digest_customer")
+customer = None if selected_customer == "(All Customers)" else selected_customer
+
+view_tables = get_customer_risk_tables(customer)
+view_baseline = view_tables["baseline"]
+
+scope_label = f"**{customer}**" if customer else "all customers"
+st.subheader("Top Risk Areas")
+st.caption(f"Showing historical H/C rates for {scope_label}.")
+
 
 def top_risk_chart(df: pd.DataFrame, dim_col: str, title: str, n: int = 15):
     if df.empty:
@@ -101,10 +113,10 @@ def top_risk_chart(df: pd.DataFrame, dim_col: str, title: str, n: int = 15):
         title=title,
     )
     fig.add_vline(
-        x=baseline,
+        x=view_baseline,
         line_dash="dash",
         line_color="black",
-        annotation_text=f"Baseline {baseline:.1%}",
+        annotation_text=f"Baseline {view_baseline:.1%}",
     )
     fig.update_layout(
         height=max(300, n * 30 + 80),
@@ -117,40 +129,35 @@ def top_risk_chart(df: pd.DataFrame, dim_col: str, title: str, n: int = 15):
     fig.update_traces(textposition="outside")
     st.plotly_chart(fig, use_container_width=True)
 
+
+tab1, tab2, tab3 = st.tabs(["Components", "Platforms", "Environments"])
+
 with tab1:
     col_a, col_b = st.columns(2)
     with col_a:
         top_risk_chart(
-            tables.get("App Component", pd.DataFrame()),
+            view_tables.get("App Component", pd.DataFrame()),
             "App Component",
             "Top Risky Components",
         )
     with col_b:
         top_risk_chart(
-            tables.get("Parent App Component", pd.DataFrame()),
-            "Parent App Component",
-            "Top Risky Parent Components",
+            view_tables.get("Bug Type", pd.DataFrame()),
+            "Bug Type",
+            "Top Risky Bug Types",
         )
 
 with tab2:
     top_risk_chart(
-        tables.get("Platform Product Name", pd.DataFrame()),
+        view_tables.get("Platform Product Name", pd.DataFrame()),
         "Platform Product Name",
         "Top Risky Platforms",
     )
 
 with tab3:
     top_risk_chart(
-        tables.get("Development Stage", pd.DataFrame()),
+        view_tables.get("Development Stage", pd.DataFrame()),
         "Development Stage",
         "H/C Rate by Development Stage",
         n=10,
     )
-
-st.divider()
-st.subheader("Customer Risk Profile")
-customer_tbl = tables.get("Customer", pd.DataFrame())
-if not customer_tbl.empty:
-    top_risk_chart(customer_tbl, "Customer", "H/C Rate by Customer", n=20)
-else:
-    st.info("No customer data available.")

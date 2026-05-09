@@ -5,13 +5,13 @@ DATA_DIR = os.path.join(ROOT, "data")
 ARTIFACTS_DIR = os.path.join(ROOT, "model", "artifacts")
 
 CATEGORICAL_FEATURES = [
-    "App Component",
-    "Parent App Component",
+    "Customer",
+    "Test Cycle Testing Type",
     "Platform Product Name",
     "Development Stage",
-    "Bug Request Source",
     "Bug Source Type",
-    "Testing Approach",
+    "App Component",
+    "Bug Type",
 ]
 
 NUMERIC_FEATURES = [

@@ -40,9 +40,25 @@ def get_feature_info() -> dict:
     return _feature_info
 
 
-def predict_release_risk(inputs: dict) -> dict:
+def get_customer_list() -> list[str]:
+    _load()
+    return sorted(_risk_tables.get("customer_tables", {}).keys())
+
+
+def get_customer_risk_tables(customer: str | None) -> dict:
+    """Return customer-filtered risk tables, or all-data tables if customer is None."""
+    _load()
+    if customer:
+        cust_tables = _risk_tables.get("customer_tables", {})
+        if customer in cust_tables:
+            return cust_tables[customer]
+    return _risk_tables
+
+
+def predict_release_risk(inputs: dict, customer: str | None = None) -> dict:
     """
     inputs: dict mapping feature names to values (matching CATEGORICAL/NUMERIC_FEATURES)
+    customer: if provided, the component breakdown uses that customer's historical data only
     Returns dict with risk_score, baseline, risk_delta, risk_label, component_breakdown
     """
     _load()
@@ -61,20 +77,18 @@ def predict_release_risk(inputs: dict) -> dict:
     else:
         label, color = "Normal Risk", "#2ca02c"
 
-    component_tbl = _risk_tables.get("App Component", pd.DataFrame())
-
-    selected_component = inputs.get("App Component")
-    selected_parent = inputs.get("Parent App Component")
-    selected_platform = inputs.get("Platform Product Name")
+    view_tables = get_customer_risk_tables(customer)
+    component_tbl = view_tables.get("App Component", pd.DataFrame())
+    view_baseline = view_tables["baseline"]
 
     return {
         "risk_score": prob,
         "baseline": baseline,
+        "view_baseline": view_baseline,
         "risk_delta": delta,
         "risk_label": label,
         "risk_color": color,
         "component_breakdown": component_tbl,
-        "selected_component": selected_component,
-        "selected_parent": selected_parent,
-        "selected_platform": selected_platform,
+        "selected_component": inputs.get("App Component"),
+        "selected_platform": inputs.get("Platform Product Name"),
     }

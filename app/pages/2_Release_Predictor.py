@@ -7,7 +7,9 @@ import plotly.graph_objects as go
 import plotly.express as px
 import pandas as pd
 
-from model.predict import artifacts_exist, get_feature_info, predict_release_risk
+from model.predict import (
+    artifacts_exist, get_feature_info, get_customer_list, predict_release_risk,
+)
 
 st.set_page_config(page_title="Release Predictor — ApplauseML", page_icon="🎯", layout="wide")
 st.title("Release Predictor")
@@ -22,6 +24,7 @@ if not artifacts_exist():
 
 feature_info = get_feature_info()
 categories = feature_info["categories"]
+customers = get_customer_list()
 
 
 def cat_options(col: str) -> list:
@@ -29,47 +32,65 @@ def cat_options(col: str) -> list:
     return ["(not specified)"] + opts
 
 
+def to_input(val):
+    return None if val == "(not specified)" else val
+
+
 st.subheader("Release Details")
 st.markdown("Fill in what you know about the upcoming release. Unknown fields can be left unspecified.")
+
+# Customer is the first field and scopes all downstream breakdown data
+customer_options = ["(not specified)"] + customers
+customer_val = st.selectbox(
+    "Customer",
+    customer_options,
+    help="Selecting a customer scopes the risk breakdown to that customer's historical data.",
+)
+customer = to_input(customer_val)
+if customer:
+    st.caption(f"Risk breakdown will use **{customer}** data only.")
 
 col1, col2 = st.columns(2)
 
 with col1:
-    app_component = st.selectbox(
-        "App Component",
-        cat_options("App Component"),
-        help="The specific component being released or tested.",
-    )
-    parent_component = st.selectbox(
-        "Parent App Component",
-        cat_options("Parent App Component"),
-        help="High-level product area.",
+    testing_type = st.selectbox(
+        "Testing Type",
+        cat_options("Test Cycle Testing Type"),
+        help="Functional, Accessibility, Security, or Usability.",
     )
     platform = st.selectbox(
         "Platform",
         cat_options("Platform Product Name"),
         help="e.g. iOS, Android, Web",
     )
+
+with col2:
     dev_stage = st.selectbox(
         "Development Stage",
         cat_options("Development Stage"),
         help="Pre-production, production, etc.",
-    )
-
-with col2:
-    testing_approach = st.selectbox(
-        "Testing Approach",
-        cat_options("Testing Approach"),
     )
     bug_source_type = st.selectbox(
         "Bug Source Type",
         cat_options("Bug Source Type"),
         help="Structured (scripted) vs exploratory.",
     )
-    bug_request_source = st.selectbox(
-        "Bug Request Source",
-        cat_options("Bug Request Source"),
+
+col3, col4 = st.columns(2)
+
+with col3:
+    app_component = st.selectbox(
+        "App Component",
+        cat_options("App Component"),
+        help="The specific component being released or tested.",
     )
+    bug_type = st.selectbox(
+        "Bug Type",
+        cat_options("Bug Type"),
+        help="Category of bug expected (Functional, Visual, etc.).",
+    )
+
+with col4:
     cycle_duration = st.number_input(
         "Estimated Cycle Duration (days)",
         min_value=0,
@@ -85,29 +106,25 @@ with col2:
         help="Leave at 0 if unknown.",
     )
 
-
-def to_input(val):
-    return None if val == "(not specified)" else val
-
-
 run = st.button("Predict Release Risk", type="primary", use_container_width=False)
 
 if run:
     inputs = {
-        "App Component": to_input(app_component),
-        "Parent App Component": to_input(parent_component),
+        "Customer": customer,
+        "Test Cycle Testing Type": to_input(testing_type),
         "Platform Product Name": to_input(platform),
         "Development Stage": to_input(dev_stage),
-        "Testing Approach": to_input(testing_approach),
         "Bug Source Type": to_input(bug_source_type),
-        "Bug Request Source": to_input(bug_request_source),
+        "App Component": to_input(app_component),
+        "Bug Type": to_input(bug_type),
         "Test Cycle Duration Activation to Lock/Close/Today": cycle_duration or None,
         "Bug Rate Amount": bug_rate or None,
     }
 
-    result = predict_release_risk(inputs)
+    result = predict_release_risk(inputs, customer=customer)
     risk = result["risk_score"]
     baseline = result["baseline"]
+    view_baseline = result["view_baseline"]
     delta = result["risk_delta"]
     label = result["risk_label"]
     color = result["risk_color"]
@@ -152,24 +169,14 @@ if run:
     st.caption(f"Black marker on gauge = overall baseline ({baseline:.1%})")
 
     st.divider()
+    scope_label = f"**{customer}**" if customer else "all customers"
     st.subheader("Where Bugs Are Most Likely to Arise")
+    st.caption(f"Component risk breakdown from {scope_label} historical data.")
 
     comp_tbl = result["component_breakdown"]
     if not comp_tbl.empty:
-        selected_parent = to_input(parent_component)
         display_tbl = comp_tbl.copy()
-
-        st.markdown("**Component Risk Breakdown** (historical H/C rate, all data)")
-        top20 = display_tbl.head(20).copy()
-        top20["hc_rate_pct"] = top20["hc_rate"].map("{:.1%}".format)
-        top20["vs_baseline"] = top20["vs_baseline"].map(
-            lambda x: f"+{x:.1%}" if x >= 0 else f"{x:.1%}"
-        )
-
-        if to_input(app_component):
-            top20["Selected"] = top20["App Component"] == to_input(app_component)
-        else:
-            top20["Selected"] = False
+        display_tbl["vs_baseline"] = display_tbl["hc_rate"] - view_baseline
 
         fig_comp = px.bar(
             display_tbl.head(20),
@@ -184,10 +191,10 @@ if run:
             labels={"hc_rate": "H/C Rate", "App Component": ""},
         )
         fig_comp.add_vline(
-            x=baseline,
+            x=view_baseline,
             line_dash="dash",
             line_color="black",
-            annotation_text=f"Baseline {baseline:.1%}",
+            annotation_text=f"Baseline {view_baseline:.1%}",
         )
         fig_comp.update_layout(
             height=max(350, len(display_tbl.head(20)) * 28 + 80),
@@ -216,4 +223,4 @@ if run:
                 use_container_width=True,
             )
     else:
-        st.info("Component breakdown not available.")
+        st.info("Component breakdown not available for the selected scope.")
