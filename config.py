@@ -30,12 +30,12 @@ N_NMF_FACTORS = 15
 
 KEYWORD_GROUPS = {
     "text_flag_crash": r"\b(crash|freeze|hang|unresponsive|force.?close)\b",
-    "text_flag_data_integrity": r"\b(data.?loss|incorrect|missing|wrong|corrupt(ed)?)\b",
+    "text_flag_data_integrity": r"\b(data.?loss|incorrect|missing|wrong|corrupt(?:ed)?)\b",
     "text_flag_error": r"\b(error|exception|null|undefined|failed.?to.?load)\b",
     "text_flag_security": r"\b(security|unauthorized|unauthorised|exposed|bypass)\b",
     "text_flag_visibility": r"\b(blank|white.?screen|not.?loading|broken)\b",
     "text_flag_performance": r"\b(slow|timeout|time.?out|performance|lag|latency)\b",
-    "text_flag_access": r"\b(login|auth(entication)?|permission|access.?denied|session)\b",
+    "text_flag_access": r"\b(login|auth(?:entication)?|permission|access.?denied|session)\b",
 }
 
 TEXT_FLAG_FEATURES = list(KEYWORD_GROUPS.keys())
