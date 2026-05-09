@@ -95,17 +95,14 @@ tab1, tab2, tab3, tab4 = st.tabs(
 )
 
 with tab1:
-    st.subheader("App Components — Ranked by H/C Rate")
     col_a, col_b = st.columns(2)
     with col_a:
-        st.markdown("**By App Component**")
         risk_bar(
             tables.get("App Component", pd.DataFrame()),
             "App Component",
             "High/Critical Rate by App Component",
         )
     with col_b:
-        st.markdown("**By Bug Type**")
         risk_bar(
             tables.get("Bug Type", pd.DataFrame()),
             "Bug Type",
