@@ -58,7 +58,7 @@ def load_data() -> pd.DataFrame:
 def build_text_features(df: pd.DataFrame) -> tuple:
     """Stream A: keyword flags, TF-IDF + SVD, sentence embeddings + PCA."""
     subject = df["Bug Subject"].fillna("") if "Bug Subject" in df.columns else pd.Series("", index=df.index)
-    result = df["Bug Result"].fillna("") if "Bug Result" in df.columns else pd.Series("", index=df.index)
+    result  = df["Bug Result"].fillna("")  if "Bug Result"  in df.columns else pd.Series("", index=df.index)
     text = (subject + " " + result).str.strip()
 
     # Layer 1: keyword flags
@@ -175,7 +175,6 @@ def build_graph_features(df: pd.DataFrame) -> tuple:
                 "clustering": cl.get(node, 0.0),
             }
 
-    # Build per-entity lookup dicts for fast vectorized map
     def make_lookup(prefix, metric):
         return {
             k.split(":", 1)[1]: v[metric]
@@ -183,27 +182,70 @@ def build_graph_features(df: pd.DataFrame) -> tuple:
             if k.startswith(f"{prefix}:")
         }
 
-    comp_pr   = make_lookup("App Component", "pagerank")
-    comp_dc   = make_lookup("App Component", "degree_centrality")
-    comp_cl   = make_lookup("App Component", "clustering")
-    plat_pr   = make_lookup("Platform Product Name", "pagerank")
-    cust_pr   = make_lookup("Customer", "pagerank")
+    comp_pr = make_lookup("App Component", "pagerank")
+    comp_dc = make_lookup("App Component", "degree_centrality")
+    comp_cl = make_lookup("App Component", "clustering")
+    plat_pr = make_lookup("Platform Product Name", "pagerank")
+    cust_pr = make_lookup("Customer", "pagerank")
 
     feature_df = pd.DataFrame(index=df.index)
-    feature_df["graph_comp_pagerank"]     = df["App Component"].map(comp_pr).fillna(0.0) if "App Component" in df.columns else 0.0
-    feature_df["graph_comp_degree"]       = df["App Component"].map(comp_dc).fillna(0.0) if "App Component" in df.columns else 0.0
-    feature_df["graph_comp_clustering"]   = df["App Component"].map(comp_cl).fillna(0.0) if "App Component" in df.columns else 0.0
-    feature_df["graph_platform_pagerank"] = df["Platform Product Name"].map(plat_pr).fillna(0.0) if "Platform Product Name" in df.columns else 0.0
-    feature_df["graph_customer_pagerank"] = df["Customer"].map(cust_pr).fillna(0.0) if "Customer" in df.columns else 0.0
+    feature_df["graph_comp_pagerank"]     = df["App Component"].map(comp_pr).fillna(0.0)          if "App Component"         in df.columns else 0.0
+    feature_df["graph_comp_degree"]       = df["App Component"].map(comp_dc).fillna(0.0)          if "App Component"         in df.columns else 0.0
+    feature_df["graph_comp_clustering"]   = df["App Component"].map(comp_cl).fillna(0.0)          if "App Component"         in df.columns else 0.0
+    feature_df["graph_platform_pagerank"] = df["Platform Product Name"].map(plat_pr).fillna(0.0)  if "Platform Product Name" in df.columns else 0.0
+    feature_df["graph_customer_pagerank"] = df["Customer"].map(cust_pr).fillna(0.0)               if "Customer"              in df.columns else 0.0
 
-    artifacts = {"node_metrics": node_metrics}
-    return feature_df, artifacts
+    return feature_df, {"node_metrics": node_metrics}
+
+
+def compute_text_profiles(df: pd.DataFrame) -> dict:
+    """
+    Compute per-component and per-platform mean text feature profiles.
+
+    Two sub-profiles per entity:
+      'all' — mean across all bugs (used to impute text features at prediction time)
+      'hc'  — mean across H/C bugs only (used to surface risk signals in the UI)
+    """
+    all_text_cols = [c for c in TEXT_FLAG_FEATURES + TEXT_SVD_FEATURES + TEXT_EMB_FEATURES if c in df.columns]
+    flag_cols     = [c for c in TEXT_FLAG_FEATURES if c in df.columns]
+
+    def means(subset: pd.DataFrame) -> dict:
+        return subset[all_text_cols].mean().to_dict() if len(subset) > 0 else {}
+
+    global_profile = {
+        "all": means(df),
+        "hc":  means(df[df[TARGET] == 1]),
+    }
+
+    by_component = {}
+    if "App Component" in df.columns:
+        for comp, grp in df.groupby("App Component"):
+            hc_grp = grp[grp[TARGET] == 1]
+            by_component[comp] = {
+                "all":    means(grp),
+                "hc":     means(hc_grp) if len(hc_grp) >= MIN_BUGS_FOR_TABLE else {},
+                "n_bugs": len(grp),
+                "n_hc":   int(hc_grp[TARGET].sum()),
+            }
+
+    by_platform = {}
+    if "Platform Product Name" in df.columns:
+        for plat, grp in df.groupby("Platform Product Name"):
+            by_platform[plat] = {"all": means(grp)}
+
+    return {
+        "by_component":  by_component,
+        "by_platform":   by_platform,
+        "global":        global_profile,
+        "flag_cols":     flag_cols,
+        "all_text_cols": all_text_cols,
+    }
 
 
 def compute_risk_tables(df: pd.DataFrame) -> dict:
     baseline = df[TARGET].mean()
     tables = {
-        "baseline": baseline,
+        "baseline":   baseline,
         "total_bugs": len(df),
     }
 
@@ -301,9 +343,9 @@ def train_classifier(df: pd.DataFrame):
     clf.fit(X, y)
 
     feature_info = {
-        "features": features,
-        "cat_cols": available_cat,
-        "num_cols": available_num,
+        "features":     features,
+        "cat_cols":     available_cat,
+        "num_cols":     available_num,
         "base_num_cols": [c for c in NUMERIC_FEATURES if c in df.columns],
         "categories": {
             col: sorted(df[col].dropna().astype(str).unique().tolist())
@@ -324,6 +366,10 @@ def main():
     df = pd.concat([df, text_features], axis=1)
     print(f"  {len(text_features.columns)} text feature columns added")
 
+    print("Computing per-entity text profiles...")
+    text_profiles = compute_text_profiles(df)
+    print(f"  {len(text_profiles['by_component'])} component profiles  |  {len(text_profiles['by_platform'])} platform profiles")
+
     print("Building NMF association features...")
     nmf_features, nmf_artifacts = build_nmf_features(df)
     df = pd.concat([df, nmf_features], axis=1)
@@ -341,10 +387,11 @@ def main():
     print("Training classifier...")
     clf, feature_info = train_classifier(df)
 
-    joblib.dump(clf,           os.path.join(ARTIFACTS_DIR, "classifier.joblib"))
-    joblib.dump(risk_tables,   os.path.join(ARTIFACTS_DIR, "risk_tables.joblib"))
-    joblib.dump(feature_info,  os.path.join(ARTIFACTS_DIR, "feature_info.joblib"))
+    joblib.dump(clf,            os.path.join(ARTIFACTS_DIR, "classifier.joblib"))
+    joblib.dump(risk_tables,    os.path.join(ARTIFACTS_DIR, "risk_tables.joblib"))
+    joblib.dump(feature_info,   os.path.join(ARTIFACTS_DIR, "feature_info.joblib"))
     joblib.dump(text_artifacts, os.path.join(ARTIFACTS_DIR, "text_pipeline.joblib"))
+    joblib.dump(text_profiles,  os.path.join(ARTIFACTS_DIR, "text_profiles.joblib"))
     joblib.dump(nmf_artifacts,  os.path.join(ARTIFACTS_DIR, "nmf_model.joblib"))
     joblib.dump(graph_artifacts, os.path.join(ARTIFACTS_DIR, "graph_artifacts.joblib"))
 

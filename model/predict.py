@@ -8,11 +8,12 @@ import pandas as pd
 
 from config import ARTIFACTS_DIR, N_SVD_COMPONENTS, N_EMB_COMPONENTS, N_NMF_FACTORS
 
-_model = None
-_risk_tables = None
-_feature_info = None
-_text_pipeline = None
-_nmf_model = None
+_model          = None
+_risk_tables    = None
+_feature_info   = None
+_text_pipeline  = None
+_text_profiles  = None
+_nmf_model      = None
 _graph_artifacts = None
 _sentence_model = None
 
@@ -23,7 +24,7 @@ def _safe_load(path):
 
 def _load():
     global _model, _risk_tables, _feature_info
-    global _text_pipeline, _nmf_model, _graph_artifacts, _sentence_model
+    global _text_pipeline, _text_profiles, _nmf_model, _graph_artifacts, _sentence_model
 
     if _model is not None:
         return
@@ -39,6 +40,7 @@ def _load():
     _feature_info = joblib.load(os.path.join(ARTIFACTS_DIR, "feature_info.joblib"))
 
     _text_pipeline  = _safe_load(os.path.join(ARTIFACTS_DIR, "text_pipeline.joblib"))
+    _text_profiles  = _safe_load(os.path.join(ARTIFACTS_DIR, "text_profiles.joblib"))
     _nmf_model      = _safe_load(os.path.join(ARTIFACTS_DIR, "nmf_model.joblib"))
     _graph_artifacts = _safe_load(os.path.join(ARTIFACTS_DIR, "graph_artifacts.joblib"))
 
@@ -61,28 +63,28 @@ def get_feature_info() -> dict:
     return _feature_info
 
 
-def _apply_text_features(row: dict, bug_subject: str, bug_result: str) -> None:
-    """Compute and insert text feature values into row in-place."""
-    import re
-    text = (str(bug_subject or "") + " " + str(bug_result or "")).strip()
+def _apply_text_features_from_profile(row: dict, inputs: dict) -> None:
+    """
+    Impute text features from the historical per-entity text profile rather than
+    requiring raw bug text. Resolution order: component → platform → global mean.
+    """
+    comp     = inputs.get("App Component")
+    platform = inputs.get("Platform Product Name")
 
-    for col, pattern in _text_pipeline["keyword_groups"].items():
-        row[col] = int(bool(re.search(pattern, text, re.IGNORECASE)))
+    all_text_cols = _text_profiles["all_text_cols"]
 
-    tfidf_vec = _text_pipeline["tfidf"].transform([text])
-    svd_vec   = _text_pipeline["svd"].transform(tfidf_vec)[0]
-    n_svd     = _text_pipeline["n_svd"]
-    for i in range(N_SVD_COMPONENTS):
-        row[f"text_svd_{i}"] = float(svd_vec[i]) if i < n_svd else 0.0
+    comp_profile = _text_profiles["by_component"].get(comp, {}).get("all", {}) if comp else {}
+    plat_profile = _text_profiles["by_platform"].get(platform, {}).get("all", {}) if platform else {}
+    global_profile = _text_profiles["global"]["all"]
 
-    if text and _sentence_model is not None:
-        embedding = _sentence_model.encode([text])
-    else:
-        embedding = np.zeros((1, 384))
-    pca_vec = _text_pipeline["pca"].transform(embedding)[0]
-    n_emb   = _text_pipeline["n_emb"]
-    for i in range(N_EMB_COMPONENTS):
-        row[f"text_emb_{i}"] = float(pca_vec[i]) if i < n_emb else 0.0
+    for col in all_text_cols:
+        row[col] = (
+            comp_profile.get(col)
+            if comp_profile.get(col) is not None
+            else plat_profile.get(col)
+            if plat_profile.get(col) is not None
+            else global_profile.get(col, 0.0)
+        )
 
 
 def _apply_nmf_features(row: dict, inputs: dict) -> None:
@@ -120,10 +122,44 @@ def _apply_graph_features(row: dict, inputs: dict) -> None:
     row["graph_customer_pagerank"] = lookup("Customer", customer, "pagerank")
 
 
+def get_text_risk_signals(component: str = None, platform: str = None) -> list:
+    """
+    Return keyword flag elevations for the given component vs. the global H/C baseline.
+
+    Each item: {col, label, elevation, component_hc_rate, global_hc_rate}
+    Sorted descending by elevation. Only returned when the component has enough
+    H/C bugs for a stable estimate (MIN_BUGS_FOR_TABLE enforced at training time).
+    Returns [] when no profile is available or artifacts are old-format.
+    """
+    _load()
+    if _text_profiles is None:
+        return []
+
+    flag_cols  = _text_profiles["flag_cols"]
+    global_hc  = _text_profiles["global"]["hc"]
+    comp_data  = _text_profiles["by_component"].get(component, {}) if component else {}
+    comp_hc    = comp_data.get("hc", {})
+
+    if not comp_hc:
+        return []
+
+    signals = []
+    for col in flag_cols:
+        comp_rate   = comp_hc.get(col, 0.0)
+        global_rate = global_hc.get(col, 0.0)
+        signals.append({
+            "col":               col,
+            "elevation":         comp_rate - global_rate,
+            "component_hc_rate": comp_rate,
+            "global_hc_rate":    global_rate,
+        })
+
+    return sorted(signals, key=lambda x: x["elevation"], reverse=True)
+
+
 def predict_release_risk(inputs: dict) -> dict:
     """
     inputs: dict mapping feature names to values.
-            Optional keys: 'bug_subject', 'bug_result' for text features.
     Returns dict with risk_score, baseline, risk_delta, risk_label, component_breakdown.
     """
     _load()
@@ -131,17 +167,11 @@ def predict_release_risk(inputs: dict) -> dict:
     is_multimodal = _feature_info.get("has_multimodal", False)
     features      = _feature_info["features"]
 
-    # Base categorical + original numeric features from user inputs
     row = {f: inputs.get(f) for f in features}
 
-    # Engineered features (only when model was trained with them)
     if is_multimodal:
-        if _text_pipeline is not None:
-            _apply_text_features(
-                row,
-                inputs.get("bug_subject", ""),
-                inputs.get("bug_result", ""),
-            )
+        if _text_profiles is not None:
+            _apply_text_features_from_profile(row, inputs)
         if _nmf_model is not None:
             _apply_nmf_features(row, inputs)
         if _graph_artifacts is not None:
