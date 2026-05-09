@@ -122,6 +122,55 @@ def _apply_graph_features(row: dict, inputs: dict) -> None:
     row["graph_customer_pagerank"] = lookup("Customer", customer, "pagerank")
 
 
+def get_feature_importances() -> pd.DataFrame:
+    """
+    Return a DataFrame of feature name + importance from the trained RandomForest,
+    with a 'group' column for aggregated display.
+    """
+    _load()
+    features    = _feature_info["features"]
+    importances = _model.named_steps["classifier"].feature_importances_
+
+    df = pd.DataFrame({"feature": features, "importance": importances})
+
+    def _group(f):
+        if f.startswith("text_svd_"):   return "Text: TF-IDF Topics"
+        if f.startswith("text_emb_"):   return "Text: Semantic Embeddings"
+        if f.startswith("text_flag_"):  return "Text: Keyword Flags"
+        if f.startswith("nmf_factor_"): return "NMF: Latent Risk Archetypes"
+        if f.startswith("graph_"):      return "Graph: Network Metrics"
+        return "Core Features"
+
+    df["group"] = df["feature"].apply(_group)
+    return df.sort_values("importance", ascending=False).reset_index(drop=True)
+
+
+def get_graph_network_data() -> pd.DataFrame:
+    """
+    Return graph node metrics as a DataFrame for scatter/bubble visualization.
+    Columns: entity_type, entity_name, pagerank, degree_centrality, clustering.
+    """
+    _load()
+    if _graph_artifacts is None:
+        return pd.DataFrame()
+
+    rows = []
+    for node_key, metrics in _graph_artifacts["node_metrics"].items():
+        entity_type, entity_name = node_key.split(":", 1)
+        rows.append({
+            "entity_type":       entity_type,
+            "entity_name":       entity_name,
+            "pagerank":          metrics["pagerank"],
+            "degree_centrality": metrics["degree_centrality"],
+            "clustering":        metrics["clustering"],
+        })
+    return (
+        pd.DataFrame(rows)
+        .sort_values("pagerank", ascending=False)
+        .reset_index(drop=True)
+    )
+
+
 def get_text_risk_signals(component: str = None, platform: str = None) -> list:
     """
     Return keyword flag elevations for the given component vs. the global H/C baseline.

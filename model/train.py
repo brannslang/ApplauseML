@@ -233,12 +233,31 @@ def compute_text_profiles(df: pd.DataFrame) -> dict:
         for plat, grp in df.groupby("Platform Product Name"):
             by_platform[plat] = {"all": means(grp)}
 
+    # Monthly keyword flag trends
+    date_col = next(
+        (c for c in df.columns if "create" in c.lower() and "date" in c.lower()), None
+    )
+    monthly_flag_trends = None
+    if date_col and flag_cols:
+        _df = df.copy()
+        _df["_month"] = pd.to_datetime(_df[date_col], errors="coerce").dt.to_period("M")
+        agg = {f: "mean" for f in flag_cols}
+        agg[TARGET] = "count"
+        monthly_flag_trends = (
+            _df.groupby("_month")
+            .agg(agg)
+            .reset_index()
+            .rename(columns={"_month": "month", TARGET: "n_bugs"})
+        )
+        monthly_flag_trends["month"] = monthly_flag_trends["month"].astype(str)
+
     return {
-        "by_component":  by_component,
-        "by_platform":   by_platform,
-        "global":        global_profile,
-        "flag_cols":     flag_cols,
-        "all_text_cols": all_text_cols,
+        "by_component":       by_component,
+        "by_platform":        by_platform,
+        "global":             global_profile,
+        "flag_cols":          flag_cols,
+        "all_text_cols":      all_text_cols,
+        "monthly_flag_trends": monthly_flag_trends,
     }
 
 
