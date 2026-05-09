@@ -133,19 +133,11 @@ def top_risk_chart(df: pd.DataFrame, dim_col: str, title: str, n: int = 15):
 tab1, tab2, tab3 = st.tabs(["Components", "Platforms", "Environments"])
 
 with tab1:
-    col_a, col_b = st.columns(2)
-    with col_a:
-        top_risk_chart(
-            view_tables.get("App Component", pd.DataFrame()),
-            "App Component",
-            "Top Risky Components",
-        )
-    with col_b:
-        top_risk_chart(
-            view_tables.get("Bug Type", pd.DataFrame()),
-            "Bug Type",
-            "Top Risky Bug Types",
-        )
+    top_risk_chart(
+        view_tables.get("App Component", pd.DataFrame()),
+        "App Component",
+        "Top Risky Components",
+    )
 
 with tab2:
     top_risk_chart(
