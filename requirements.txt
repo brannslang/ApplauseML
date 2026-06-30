@@ -7,3 +7,5 @@ streamlit>=1.35
 plotly>=5.18
 scipy>=1.11
 statsmodels>=0.14
+networkx>=3.0
+sentence-transformers>=2.7

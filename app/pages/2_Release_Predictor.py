@@ -7,7 +7,12 @@ import plotly.graph_objects as go
 import plotly.express as px
 import pandas as pd
 
-from model.predict import artifacts_exist, get_feature_info, predict_release_risk
+from model.predict import (
+    get_feature_info,
+    get_text_risk_signals,
+    predict_release_risk,
+)
+from app.utils import require_customer
 
 st.set_page_config(page_title="Release Predictor — ApplauseML", page_icon="🎯", layout="wide")
 st.title("Release Predictor")
@@ -16,17 +21,23 @@ st.caption(
     "plus a breakdown of where bugs are most likely to surface."
 )
 
-if not artifacts_exist():
-    st.error("Model artifacts not found. Run `python model/train.py` first.")
-    st.stop()
-
+customer     = require_customer()
 feature_info = get_feature_info()
-categories = feature_info["categories"]
+categories   = feature_info["categories"]
+
+FLAG_LABELS = {
+    "text_flag_crash":          "Crash / Freeze / Hang",
+    "text_flag_data_integrity": "Data Integrity Issues",
+    "text_flag_error":          "Error / Exception",
+    "text_flag_security":       "Security / Bypass",
+    "text_flag_visibility":     "Blank / Broken UI",
+    "text_flag_performance":    "Performance / Timeout",
+    "text_flag_access":         "Auth / Login / Permissions",
+}
 
 
 def cat_options(col: str) -> list:
-    opts = categories.get(col, [])
-    return ["(not specified)"] + opts
+    return ["(not specified)"] + categories.get(col, [])
 
 
 st.subheader("Release Details")
@@ -55,6 +66,7 @@ with col1:
         cat_options("Development Stage"),
         help="Pre-production, production, etc.",
     )
+    st.info(f"Customer: **{customer}**", icon="🏢")
 
 with col2:
     testing_approach = st.selectbox(
@@ -94,23 +106,24 @@ run = st.button("Predict Release Risk", type="primary", use_container_width=Fals
 
 if run:
     inputs = {
-        "App Component": to_input(app_component),
-        "Parent App Component": to_input(parent_component),
-        "Platform Product Name": to_input(platform),
-        "Development Stage": to_input(dev_stage),
-        "Testing Approach": to_input(testing_approach),
-        "Bug Source Type": to_input(bug_source_type),
-        "Bug Request Source": to_input(bug_request_source),
+        "App Component":             to_input(app_component),
+        "Parent App Component":      to_input(parent_component),
+        "Platform Product Name":     to_input(platform),
+        "Development Stage":         to_input(dev_stage),
+        "Customer":                  customer,
+        "Testing Approach":          to_input(testing_approach),
+        "Bug Source Type":           to_input(bug_source_type),
+        "Bug Request Source":        to_input(bug_request_source),
         "Test Cycle Duration Activation to Lock/Close/Today": cycle_duration or None,
-        "Bug Rate Amount": bug_rate or None,
+        "Bug Rate Amount":           bug_rate or None,
     }
 
-    result = predict_release_risk(inputs)
-    risk = result["risk_score"]
+    result   = predict_release_risk(inputs)
+    risk     = result["risk_score"]
     baseline = result["baseline"]
-    delta = result["risk_delta"]
-    label = result["risk_label"]
-    color = result["risk_color"]
+    delta    = result["risk_delta"]
+    label    = result["risk_label"]
+    color    = result["risk_color"]
 
     st.divider()
     st.subheader("Prediction Report")
@@ -134,9 +147,9 @@ if run:
                 "axis": {"range": [0, 100], "ticksuffix": "%"},
                 "bar": {"color": color},
                 "steps": [
-                    {"range": [0, 35], "color": "#e8f5e9"},
+                    {"range": [0, 35],  "color": "#e8f5e9"},
                     {"range": [35, 50], "color": "#fff3e0"},
-                    {"range": [50, 100], "color": "#ffebee"},
+                    {"range": [50, 100],"color": "#ffebee"},
                 ],
                 "threshold": {
                     "line": {"color": "black", "width": 3},
@@ -151,12 +164,70 @@ if run:
     st.plotly_chart(fig_gauge, use_container_width=True)
     st.caption(f"Black marker on gauge = overall baseline ({baseline:.1%})")
 
+    # --- Bug Language Risk Signals ---
+    signals = get_text_risk_signals(
+        component=to_input(app_component),
+        platform=to_input(platform),
+    )
+    visible_signals = [s for s in signals if s["elevation"] > 0.02]
+
+    if visible_signals:
+        st.divider()
+        st.subheader("Bug Language Risk Signals")
+        st.caption(
+            "Among historically High/Critical bugs for this component, these language "
+            "patterns appear more often than the global H/C baseline — surfaced automatically "
+            "from historical bug descriptions."
+        )
+
+        sig_df = pd.DataFrame([
+            {
+                "Pattern":                 FLAG_LABELS.get(s["col"], s["col"]),
+                "Elevation vs Baseline":   s["elevation"],
+                "H/C Rate (this component)": s["component_hc_rate"],
+                "H/C Rate (global)":       s["global_hc_rate"],
+            }
+            for s in visible_signals
+        ])
+
+        fig_sig = px.bar(
+            sig_df,
+            x="Elevation vs Baseline",
+            y="Pattern",
+            orientation="h",
+            color="Elevation vs Baseline",
+            color_continuous_scale=["#aec7e8", "#ff7f0e", "#d62728"],
+            range_color=[0, 0.3],
+            text=sig_df["Elevation vs Baseline"].map("{:+.0%}".format),
+            hover_data={
+                "H/C Rate (this component)": ":.1%",
+                "H/C Rate (global)": ":.1%",
+                "Elevation vs Baseline": False,
+            },
+            labels={"Elevation vs Baseline": "Elevation vs Global H/C Baseline", "Pattern": ""},
+        )
+        fig_sig.update_layout(
+            height=max(220, len(sig_df) * 40 + 80),
+            yaxis=dict(autorange="reversed"),
+            xaxis=dict(tickformat=".0%"),
+            coloraxis_showscale=False,
+            plot_bgcolor="white",
+            margin=dict(l=10, r=100, t=20, b=40),
+        )
+        fig_sig.update_traces(textposition="outside")
+        st.plotly_chart(fig_sig, use_container_width=True)
+        st.caption(
+            "Elevation = how much more frequently this language pattern appears in H/C bugs "
+            "for this component vs. all H/C bugs globally. No user input required — derived "
+            "entirely from historical bug data."
+        )
+
+    # --- Component Breakdown ---
     st.divider()
     st.subheader("Where Bugs Are Most Likely to Arise")
 
     comp_tbl = result["component_breakdown"]
     if not comp_tbl.empty:
-        selected_parent = to_input(parent_component)
         display_tbl = comp_tbl.copy()
 
         st.markdown("**Component Risk Breakdown** (historical H/C rate, all data)")
@@ -204,14 +275,14 @@ if run:
             st.dataframe(
                 display_tbl[["App Component", "hc_rate", "n_bugs", "n_hc", "vs_baseline"]]
                 .rename(columns={
-                    "hc_rate": "H/C Rate",
-                    "n_bugs": "Total Bugs",
-                    "n_hc": "H/C Bugs",
-                    "vs_baseline": "vs Baseline",
+                    "hc_rate":    "H/C Rate",
+                    "n_bugs":     "Total Bugs",
+                    "n_hc":       "H/C Bugs",
+                    "vs_baseline":"vs Baseline",
                 })
                 .style.format({
-                    "H/C Rate": "{:.1%}",
-                    "vs Baseline": "{:+.1%}",
+                    "H/C Rate":   "{:.1%}",
+                    "vs Baseline":"{:+.1%}",
                 }),
                 use_container_width=True,
             )
