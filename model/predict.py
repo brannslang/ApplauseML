@@ -45,8 +45,11 @@ def _load():
     _graph_artifacts = _safe_load(os.path.join(ARTIFACTS_DIR, "graph_artifacts.joblib"))
 
     if _text_pipeline is not None:
-        from sentence_transformers import SentenceTransformer
-        _sentence_model = SentenceTransformer(_text_pipeline["sentence_model_name"])
+        try:
+            from sentence_transformers import SentenceTransformer
+            _sentence_model = SentenceTransformer(_text_pipeline["sentence_model_name"])
+        except ImportError:
+            pass  # not installed in cloud env; precomputed text profiles handle inference
 
 
 def artifacts_exist() -> bool:
