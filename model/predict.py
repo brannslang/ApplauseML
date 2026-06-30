@@ -206,6 +206,14 @@ def get_text_risk_signals(component: str = None, platform: str = None) -> list:
     return sorted(signals, key=lambda x: x["elevation"], reverse=True)
 
 
+def get_bubble_data() -> pd.DataFrame:
+    """Return precomputed bubble chart DataFrame, or empty if not yet generated."""
+    path = os.path.join(ARTIFACTS_DIR, "bubble_data.joblib")
+    if not os.path.exists(path):
+        return pd.DataFrame()
+    return joblib.load(path)
+
+
 def predict_release_risk(inputs: dict) -> dict:
     """
     inputs: dict mapping feature names to values.

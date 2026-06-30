@@ -14,6 +14,7 @@ import networkx as nx
 import numpy as np
 import pandas as pd
 from sentence_transformers import SentenceTransformer
+from sklearn.cluster import KMeans
 from sklearn.compose import ColumnTransformer
 from sklearn.decomposition import NMF, PCA, TruncatedSVD
 from sklearn.ensemble import RandomForestClassifier
@@ -21,7 +22,7 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.impute import SimpleImputer
 from sklearn.model_selection import cross_val_score
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import OrdinalEncoder
+from sklearn.preprocessing import OrdinalEncoder, StandardScaler
 
 from config import (
     ARTIFACTS_DIR, CATEGORICAL_FEATURES, DATA_DIR,
@@ -375,6 +376,113 @@ def train_classifier(df: pd.DataFrame):
     return clf, feature_info
 
 
+BUBBLE_GROUP_COLS = [
+    "Platform Product Name",
+    "Mobile OS Major Version",
+    "App Component Name",
+]
+
+CLUSTER_NAMES = {0: "Stable", 1: "Nuisance Zone", 2: "Critical Hazard"}
+CLUSTER_COLORS = {
+    "Critical Hazard": "#d62728",
+    "Nuisance Zone":   "#ff7f0e",
+    "Stable":          "#2ca02c",
+}
+
+
+def compute_bubble_data(df: pd.DataFrame, clf, feature_info: dict) -> pd.DataFrame:
+    """
+    Build one row per (Platform, OS Major Version, App Component) group with:
+      - ml_prob:       mean classifier P(High/Critical) across bugs in the group
+      - failure_rate:  test case failure rate from devicetestruns
+      - n_bugs, severity counts: for hover tooltips
+      - cluster:       KMeans k=3 auto-labeled by centroid position
+    """
+    # --- Step 1: per-bug ML probabilities on the main training set ---
+    features = feature_info["features"]
+    available = [f for f in features if f in df.columns]
+    X_all = df[available].copy()
+    for col in feature_info.get("num_cols", []):
+        if col in X_all.columns:
+            X_all[col] = pd.to_numeric(X_all[col], errors="coerce")
+    # Pad any missing features with NaN so shape matches
+    for f in features:
+        if f not in X_all.columns:
+            X_all[f] = np.nan
+    X_all = X_all[features]
+
+    df = df.copy()
+    df["_ml_prob"] = clf.predict_proba(X_all)[:, 1]
+
+    # --- Step 2: load device-level tables ---
+    device_bugs = pd.read_excel(os.path.join(DATA_DIR, "devicebugs.xlsx"), engine="openpyxl")
+    device_runs = pd.read_excel(os.path.join(DATA_DIR, "devicetestruns.xlsx"), engine="openpyxl")
+
+    # Normalise the severity column name (may have trailing spaces)
+    sev_col = next((c for c in device_bugs.columns if c.strip() == "Bug Severity  Old".strip() or c.strip() == "Bug Severity Old"), None)
+
+    # --- Step 3: join devicebugs → bugdetails to pull ml_prob ---
+    # bugdetails key column is "Bug"; devicebugs key is "Bug Id"
+    bug_probs = df[["Bug", "_ml_prob"]].rename(columns={"Bug": "Bug Id"})
+    dbugs = device_bugs.merge(bug_probs, on="Bug Id", how="left")
+
+    # --- Step 4: aggregate per group ---
+    agg_dict = {
+        "ml_prob": ("_ml_prob", "mean"),
+        "n_bugs":  ("Bug Id",   "count"),
+    }
+    if sev_col:
+        agg_dict["n_critical"] = (sev_col, lambda x: (x == "Critical").sum())
+        agg_dict["n_high"]     = (sev_col, lambda x: (x == "High").sum())
+        agg_dict["n_medium"]   = (sev_col, lambda x: (x == "Medium").sum())
+        agg_dict["n_low"]      = (sev_col, lambda x: (x == "Low").sum())
+
+    bug_agg = (
+        dbugs.groupby(BUBBLE_GROUP_COLS)
+        .agg(**agg_dict)
+        .reset_index()
+    )
+
+    # Fill groups where no bugdetails join matched with global baseline
+    global_baseline = df["_ml_prob"].mean()
+    bug_agg["ml_prob"] = bug_agg["ml_prob"].fillna(global_baseline)
+
+    # --- Step 5: failure rate from device test runs ---
+    run_totals  = device_runs.groupby(BUBBLE_GROUP_COLS).size().rename("n_runs")
+    run_fails   = device_runs[device_runs["Result Status"] == "Failed"].groupby(BUBBLE_GROUP_COLS).size().rename("n_failed")
+    run_agg = pd.concat([run_totals, run_fails], axis=1).fillna(0).reset_index()
+    run_agg["failure_rate"] = run_agg["n_failed"] / run_agg["n_runs"].replace(0, np.nan)
+    run_agg["failure_rate"] = run_agg["failure_rate"].fillna(0.0)
+    run_agg = run_agg[BUBBLE_GROUP_COLS + ["failure_rate", "n_runs", "n_failed"]]
+
+    # --- Step 6: merge ---
+    bubble = bug_agg.merge(run_agg, on=BUBBLE_GROUP_COLS, how="outer")
+    bubble["ml_prob"]     = bubble["ml_prob"].fillna(global_baseline)
+    bubble["failure_rate"]= bubble["failure_rate"].fillna(0.0)
+    bubble["n_bugs"]      = bubble["n_bugs"].fillna(0).astype(int)
+    for col in ["n_critical", "n_high", "n_medium", "n_low"]:
+        if col in bubble.columns:
+            bubble[col] = bubble[col].fillna(0).astype(int)
+
+    # --- Step 7: KMeans clustering on (failure_rate, ml_prob) ---
+    n_clusters = min(3, len(bubble))
+    if n_clusters >= 2:
+        scaler = StandardScaler()
+        coords = scaler.fit_transform(bubble[["failure_rate", "ml_prob"]])
+        km = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+        labels = km.fit_predict(coords)
+
+        centroid_scores = km.cluster_centers_[:, 0] + km.cluster_centers_[:, 1]
+        rank = centroid_scores.argsort().argsort()  # 0=lowest … 2=highest
+
+        bubble["cluster"] = [CLUSTER_NAMES.get(rank[l], "Unknown") for l in labels]
+    else:
+        bubble["cluster"] = "Stable"
+
+    bubble["cluster_color"] = bubble["cluster"].map(CLUSTER_COLORS).fillna("#aec7e8")
+    return bubble
+
+
 def main():
     print("Loading data...")
     df = load_data()
@@ -406,6 +514,10 @@ def main():
     print("Training classifier...")
     clf, feature_info = train_classifier(df)
 
+    print("Computing bubble map data...")
+    bubble_data = compute_bubble_data(df, clf, feature_info)
+    print(f"  {len(bubble_data):,} bubbles  |  clusters: {bubble_data['cluster'].value_counts().to_dict()}")
+
     joblib.dump(clf,            os.path.join(ARTIFACTS_DIR, "classifier.joblib"))
     joblib.dump(risk_tables,    os.path.join(ARTIFACTS_DIR, "risk_tables.joblib"))
     joblib.dump(feature_info,   os.path.join(ARTIFACTS_DIR, "feature_info.joblib"))
@@ -413,6 +525,7 @@ def main():
     joblib.dump(text_profiles,  os.path.join(ARTIFACTS_DIR, "text_profiles.joblib"))
     joblib.dump(nmf_artifacts,  os.path.join(ARTIFACTS_DIR, "nmf_model.joblib"))
     joblib.dump(graph_artifacts, os.path.join(ARTIFACTS_DIR, "graph_artifacts.joblib"))
+    joblib.dump(bubble_data,    os.path.join(ARTIFACTS_DIR, "bubble_data.joblib"))
 
     print(f"\nArtifacts saved to {ARTIFACTS_DIR}/")
     print("  Done. Run 'streamlit run app/Home.py' to launch the dashboard.")
