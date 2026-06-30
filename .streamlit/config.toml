@@ -1,0 +1,10 @@
+[server]
+port = 8501
+headless = false
+
+[browser]
+serverAddress = "localhost"
+gatherUsageStats = false
+
+[theme]
+base = "dark"
