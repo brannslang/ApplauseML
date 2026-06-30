@@ -262,23 +262,12 @@ def compute_text_profiles(df: pd.DataFrame) -> dict:
     }
 
 
-def compute_risk_tables(df: pd.DataFrame) -> dict:
+def _risk_tables_for(df: pd.DataFrame) -> dict:
+    """Compute the standard risk table dict for any bug DataFrame slice."""
     baseline = df[TARGET].mean()
-    tables = {
-        "baseline":   baseline,
-        "total_bugs": len(df),
-    }
+    tables = {"baseline": baseline, "total_bugs": len(df)}
 
-    risk_dims = [
-        "App Component",
-        "Parent App Component",
-        "Platform Product Name",
-        "Development Stage",
-        "Testing Approach",
-        "Bug Source Type",
-        "Customer",
-    ]
-    for col in risk_dims:
+    for col in RISK_DIMS:
         if col not in df.columns:
             continue
         tbl = (
@@ -297,18 +286,34 @@ def compute_risk_tables(df: pd.DataFrame) -> dict:
         (c for c in df.columns if "create" in c.lower() and "date" in c.lower()), None
     )
     if date_col:
-        df = df.copy()
-        df["_month"] = pd.to_datetime(df[date_col], errors="coerce").dt.to_period("M")
+        _df = df.copy()
+        _df["_month"] = pd.to_datetime(_df[date_col], errors="coerce").dt.to_period("M")
         monthly = (
-            df.groupby("_month")[TARGET]
+            _df.groupby("_month")[TARGET]
             .agg(["mean", "count"])
             .rename(columns={"mean": "hc_rate", "count": "n_bugs"})
             .reset_index()
         )
         monthly["_month"] = monthly["_month"].astype(str)
-        monthly = monthly.rename(columns={"_month": "month"})
-        tables["monthly_trend"] = monthly
+        tables["monthly_trend"] = monthly.rename(columns={"_month": "month"})
 
+    return tables
+
+
+def compute_risk_tables(df: pd.DataFrame) -> dict:
+    tables = _risk_tables_for(df)
+
+    customers = []
+    by_customer = {}
+    if "Customer" in df.columns:
+        customers = sorted(df["Customer"].dropna().unique().tolist())
+        for customer in customers:
+            subset = df[df["Customer"] == customer]
+            if len(subset) >= MIN_BUGS_FOR_TABLE:
+                by_customer[customer] = _risk_tables_for(subset)
+
+    tables["customers"] = customers
+    tables["by_customer"] = by_customer
     return tables
 
 
@@ -377,9 +382,19 @@ def train_classifier(df: pd.DataFrame):
 
 
 BUBBLE_GROUP_COLS = [
+    "Customer",
     "Platform Product Name",
     "Mobile OS Major Version",
     "App Component Name",
+]
+
+RISK_DIMS = [
+    "App Component",
+    "Parent App Component",
+    "Platform Product Name",
+    "Development Stage",
+    "Testing Approach",
+    "Bug Source Type",
 ]
 
 CLUSTER_NAMES = {0: "Stable", 1: "Nuisance Zone", 2: "Critical Hazard"}
@@ -421,9 +436,10 @@ def compute_bubble_data(df: pd.DataFrame, clf, feature_info: dict) -> pd.DataFra
     # Normalise the severity column name (may have trailing spaces)
     sev_col = next((c for c in device_bugs.columns if c.strip() == "Bug Severity  Old".strip() or c.strip() == "Bug Severity Old"), None)
 
-    # --- Step 3: join devicebugs → bugdetails to pull ml_prob ---
+    # --- Step 3: join devicebugs → bugdetails to pull ml_prob + Customer ---
     # bugdetails key column is "Bug"; devicebugs key is "Bug Id"
-    bug_probs = df[["Bug", "_ml_prob"]].rename(columns={"Bug": "Bug Id"})
+    pull_cols = ["Bug", "_ml_prob"] + (["Customer"] if "Customer" in df.columns else [])
+    bug_probs = df[pull_cols].rename(columns={"Bug": "Bug Id"})
     dbugs = device_bugs.merge(bug_probs, on="Bug Id", how="left")
 
     # --- Step 4: aggregate per group ---
@@ -437,8 +453,9 @@ def compute_bubble_data(df: pd.DataFrame, clf, feature_info: dict) -> pd.DataFra
         agg_dict["n_medium"]   = (sev_col, lambda x: (x == "Medium").sum())
         agg_dict["n_low"]      = (sev_col, lambda x: (x == "Low").sum())
 
+    group_cols = [c for c in BUBBLE_GROUP_COLS if c in dbugs.columns]
     bug_agg = (
-        dbugs.groupby(BUBBLE_GROUP_COLS)
+        dbugs.groupby(group_cols)
         .agg(**agg_dict)
         .reset_index()
     )
@@ -447,16 +464,27 @@ def compute_bubble_data(df: pd.DataFrame, clf, feature_info: dict) -> pd.DataFra
     global_baseline = df["_ml_prob"].mean()
     bug_agg["ml_prob"] = bug_agg["ml_prob"].fillna(global_baseline)
 
-    # --- Step 5: failure rate from device test runs ---
-    run_totals  = device_runs.groupby(BUBBLE_GROUP_COLS).size().rename("n_runs")
-    run_fails   = device_runs[device_runs["Result Status"] == "Failed"].groupby(BUBBLE_GROUP_COLS).size().rename("n_failed")
+    # --- Step 5: failure rate from device test runs, joined with Customer from testcaseresults ---
+    try:
+        tc_results = pd.read_excel(
+            os.path.join(DATA_DIR, "testcaseresults.xlsx"), engine="openpyxl",
+            usecols=["Test Run Result Id", "Customer"],
+        )
+        device_runs = device_runs.merge(tc_results, on="Test Run Result Id", how="left")
+    except Exception:
+        pass  # testcaseresults join is best-effort; Customer may be missing from run_agg
+
+    run_group_cols = [c for c in BUBBLE_GROUP_COLS if c in device_runs.columns]
+    run_totals = device_runs.groupby(run_group_cols).size().rename("n_runs")
+    run_fails  = device_runs[device_runs["Result Status"] == "Failed"].groupby(run_group_cols).size().rename("n_failed")
     run_agg = pd.concat([run_totals, run_fails], axis=1).fillna(0).reset_index()
     run_agg["failure_rate"] = run_agg["n_failed"] / run_agg["n_runs"].replace(0, np.nan)
     run_agg["failure_rate"] = run_agg["failure_rate"].fillna(0.0)
-    run_agg = run_agg[BUBBLE_GROUP_COLS + ["failure_rate", "n_runs", "n_failed"]]
+    run_agg = run_agg[run_group_cols + ["failure_rate", "n_runs", "n_failed"]]
 
-    # --- Step 6: merge ---
-    bubble = bug_agg.merge(run_agg, on=BUBBLE_GROUP_COLS, how="outer")
+    # --- Step 6: merge on whichever group cols are present in both ---
+    merge_cols = [c for c in group_cols if c in run_agg.columns]
+    bubble = bug_agg.merge(run_agg, on=merge_cols, how="outer")
     bubble["ml_prob"]     = bubble["ml_prob"].fillna(global_baseline)
     bubble["failure_rate"]= bubble["failure_rate"].fillna(0.0)
     bubble["n_bugs"]      = bubble["n_bugs"].fillna(0).astype(int)

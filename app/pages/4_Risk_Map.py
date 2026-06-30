@@ -6,7 +6,8 @@ import streamlit as st
 import plotly.graph_objects as go
 import pandas as pd
 
-from model.predict import artifacts_exist, get_bubble_data
+from model.predict import get_bubble_data
+from app.utils import require_customer
 
 st.set_page_config(
     page_title="Risk Map — ApplauseML",
@@ -22,19 +23,27 @@ st.caption(
     "Bubble size = risk score (larger = higher risk)."
 )
 
-if not artifacts_exist():
-    st.error("Model artifacts not found. Run `python model/train.py` first.")
-    st.stop()
+customer  = require_customer()
+all_bubbles = get_bubble_data()
 
-bubble_df = get_bubble_data()
-
-if bubble_df.empty:
+if all_bubbles.empty:
     st.warning(
         "Bubble data not yet generated. "
         "Retrain the model with `python model/train.py` to produce it.",
         icon="⚠️",
     )
     st.stop()
+
+if "Customer" in all_bubbles.columns:
+    bubble_df = all_bubbles[all_bubbles["Customer"] == customer].copy()
+else:
+    bubble_df = all_bubbles.copy()
+
+if bubble_df.empty:
+    st.warning(f"No bubble data found for **{customer}**. The customer may not appear in the device-level datasets.")
+    st.stop()
+
+st.subheader(f"Customer: {customer}")
 
 CLUSTER_COLORS = {
     "Critical Hazard": "#d62728",

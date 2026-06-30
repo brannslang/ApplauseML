@@ -7,7 +7,8 @@ import plotly.express as px
 import plotly.graph_objects as go
 import pandas as pd
 
-from model.predict import artifacts_exist, get_risk_tables, _load, _text_profiles
+from model.predict import get_customer_risk_tables, _load, _text_profiles
+from app.utils import require_customer
 
 st.set_page_config(page_title="Monthly Digest — ApplauseML", page_icon="📅", layout="wide")
 st.title("Monthly Digest")
@@ -16,14 +17,17 @@ st.caption(
     "Refresh by rerunning `python model/train.py`."
 )
 
-if not artifacts_exist():
-    st.error("Model artifacts not found. Run `python model/train.py` first.")
+customer = require_customer()
+tables   = get_customer_risk_tables(customer)
+
+if not tables:
+    st.warning(f"No training data found for **{customer}**.")
     st.stop()
 
-tables  = get_risk_tables()
+st.subheader(f"Customer: {customer}")
 baseline = tables["baseline"]
 
-st.metric("Overall H/C Baseline Rate (all-time)", f"{baseline:.1%}")
+st.metric("H/C Baseline Rate", f"{baseline:.1%}")
 st.divider()
 
 # --- Monthly H/C Rate Trend ---
@@ -219,10 +223,3 @@ with tab3:
         n=10,
     )
 
-st.divider()
-st.subheader("Customer Risk Profile")
-customer_tbl = tables.get("Customer", pd.DataFrame())
-if not customer_tbl.empty:
-    top_risk_chart(customer_tbl, "Customer", "H/C Rate by Customer", n=20)
-else:
-    st.info("No customer data available.")

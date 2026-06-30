@@ -9,26 +9,30 @@ import pandas as pd
 
 from model.predict import (
     artifacts_exist,
+    get_customer_risk_tables,
     get_feature_importances,
     get_graph_network_data,
-    get_risk_tables,
 )
+from app.utils import require_customer
 
 st.set_page_config(page_title="Risk Dashboard — ApplauseML", page_icon="📊", layout="wide")
 st.title("Risk Dashboard")
 st.caption("Historical High/Critical bug rates by component, platform, and environment.")
 
-if not artifacts_exist():
-    st.error("Model artifacts not found. Run `python model/train.py` first.")
+customer = require_customer()
+tables   = get_customer_risk_tables(customer)
+
+if not tables:
+    st.warning(f"No training data found for **{customer}**.")
     st.stop()
 
-tables  = get_risk_tables()
+st.subheader(f"Customer: {customer}")
 baseline = tables["baseline"]
 total    = tables["total_bugs"]
 
 m1, m2 = st.columns(2)
-m1.metric("Overall H/C Baseline Rate", f"{baseline:.1%}")
-m2.metric("Total Bugs in Training Data", f"{total:,}")
+m1.metric("H/C Baseline Rate", f"{baseline:.1%}")
+m2.metric("Total Bugs", f"{total:,}")
 
 st.divider()
 
@@ -161,6 +165,7 @@ with tab4:
 
 with tab5:
     st.subheader("What Drives the Prediction")
+    st.caption("Feature importances are model-wide across all customers, not scoped to the selection above.")
     st.caption(
         "Relative importance of each feature group and top individual features "
         "in the trained Random Forest classifier."
@@ -242,6 +247,7 @@ with tab5:
 
 with tab6:
     st.subheader("Risk Network — Entity Connectivity")
+    st.caption("Network graph is model-wide across all customers, not scoped to the selection above.")
     st.caption(
         "Each bubble is an entity (component, platform, or customer). "
         "PageRank reflects structural risk connectivity — entities that "

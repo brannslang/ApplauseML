@@ -206,6 +206,18 @@ def get_text_risk_signals(component: str = None, platform: str = None) -> list:
     return sorted(signals, key=lambda x: x["elevation"], reverse=True)
 
 
+def get_customers() -> list:
+    """Return sorted list of customers present in training data."""
+    _load()
+    return _risk_tables.get("customers", [])
+
+
+def get_customer_risk_tables(customer: str) -> dict:
+    """Return risk tables scoped to a single customer."""
+    _load()
+    return _risk_tables.get("by_customer", {}).get(customer, {})
+
+
 def get_bubble_data() -> pd.DataFrame:
     """Return precomputed bubble chart DataFrame, or empty if not yet generated."""
     path = os.path.join(ARTIFACTS_DIR, "bubble_data.joblib")

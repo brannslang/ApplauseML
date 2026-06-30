@@ -8,11 +8,11 @@ import plotly.express as px
 import pandas as pd
 
 from model.predict import (
-    artifacts_exist,
     get_feature_info,
     get_text_risk_signals,
     predict_release_risk,
 )
+from app.utils import require_customer
 
 st.set_page_config(page_title="Release Predictor — ApplauseML", page_icon="🎯", layout="wide")
 st.title("Release Predictor")
@@ -21,10 +21,7 @@ st.caption(
     "plus a breakdown of where bugs are most likely to surface."
 )
 
-if not artifacts_exist():
-    st.error("Model artifacts not found. Run `python model/train.py` first.")
-    st.stop()
-
+customer     = require_customer()
 feature_info = get_feature_info()
 categories   = feature_info["categories"]
 
@@ -69,11 +66,7 @@ with col1:
         cat_options("Development Stage"),
         help="Pre-production, production, etc.",
     )
-    customer = st.selectbox(
-        "Customer",
-        cat_options("Customer"),
-        help="The customer associated with this release.",
-    )
+    st.info(f"Customer: **{customer}**", icon="🏢")
 
 with col2:
     testing_approach = st.selectbox(
@@ -117,7 +110,7 @@ if run:
         "Parent App Component":      to_input(parent_component),
         "Platform Product Name":     to_input(platform),
         "Development Stage":         to_input(dev_stage),
-        "Customer":                  to_input(customer),
+        "Customer":                  customer,
         "Testing Approach":          to_input(testing_approach),
         "Bug Source Type":           to_input(bug_source_type),
         "Bug Request Source":        to_input(bug_request_source),
