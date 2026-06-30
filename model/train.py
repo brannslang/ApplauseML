@@ -381,12 +381,18 @@ def train_classifier(df: pd.DataFrame):
     return clf, feature_info
 
 
-BUBBLE_GROUP_COLS = [
-    "Customer",
-    "Platform Product Name",
-    "Mobile OS Major Version",
-    "App Component Name",
-]
+SEVERITY_MAP = {"Critical": 4, "High": 3, "Medium": 2, "Low": 1}
+FAILURE_RATE_WEIGHT = 50
+BUG_WEIGHT = 10
+FAILURE_RATE_THRESHOLD = 0.10
+SEVERITY_THRESHOLD = 10
+
+CLUSTER_COLORS = {
+    "Critical Hotspot":              "#d62728",
+    "Nuisance Zone (High Fail, Low Sev)": "#ff7f0e",
+    "Stable Yielder":                "#2ca02c",
+    "Low ROI":                       "#aec7e8",
+}
 
 RISK_DIMS = [
     "App Component",
@@ -405,109 +411,94 @@ CLUSTER_COLORS = {
 }
 
 
-def compute_bubble_data(df: pd.DataFrame, clf, feature_info: dict) -> pd.DataFrame:
+def compute_bubble_data(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Build one row per (Platform, OS Major Version, App Component) group with:
-      - ml_prob:       mean classifier P(High/Critical) across bugs in the group
-      - failure_rate:  test case failure rate from devicetestruns
-      - n_bugs, severity counts: for hover tooltips
-      - cluster:       KMeans k=3 auto-labeled by centroid position
+    QA Predictive Radar — Device-Level Architecture (matches bsledge-applause/QA-Analytics).
+
+    Scoring:
+      Severity_Index        = sum of per-bug severity weights (Critical=4, High=3, Med=2, Low=1)
+      Predictive_Risk_Score = (Historical_Failure_Rate × 50) + (Severity_Index × 10)
+
+    Clusters (rule-based fixed thresholds):
+      Critical Hotspot              failure_rate > 10% AND severity_index > 10
+      Nuisance Zone (High Fail, Low Sev)  failure_rate > 10% AND severity_index ≤ 10
+      Low ROI                       failure_rate == 0 AND total_bugs == 0
+      Stable Yielder                everything else
     """
-    # --- Step 1: per-bug ML probabilities on the main training set ---
-    features = feature_info["features"]
-    available = [f for f in features if f in df.columns]
-    X_all = df[available].copy()
-    for col in feature_info.get("num_cols", []):
-        if col in X_all.columns:
-            X_all[col] = pd.to_numeric(X_all[col], errors="coerce")
-    # Pad any missing features with NaN so shape matches
-    for f in features:
-        if f not in X_all.columns:
-            X_all[f] = np.nan
-    X_all = X_all[features]
-
-    df = df.copy()
-    df["_ml_prob"] = clf.predict_proba(X_all)[:, 1]
-
-    # --- Step 2: load device-level tables ---
     device_bugs = pd.read_excel(os.path.join(DATA_DIR, "devicebugs.xlsx"), engine="openpyxl")
     device_runs = pd.read_excel(os.path.join(DATA_DIR, "devicetestruns.xlsx"), engine="openpyxl")
 
-    # Normalise the severity column name (may have trailing spaces)
-    sev_col = next((c for c in device_bugs.columns if c.strip() == "Bug Severity  Old".strip() or c.strip() == "Bug Severity Old"), None)
+    # --- NODE A: bug severity per (Customer, Device) ---
+    bug_lookup = df[["Bug", "Bug Severity", "Customer"]].rename(columns={"Bug": "Bug Id"})
+    master_bugs = device_bugs.merge(bug_lookup, on="Bug Id", how="left")
+    master_bugs["Severity_Weight"] = master_bugs["Bug Severity"].map(SEVERITY_MAP).fillna(1.5)
 
-    # --- Step 3: join devicebugs → bugdetails to pull ml_prob + Customer ---
-    # bugdetails key column is "Bug"; devicebugs key is "Bug Id"
-    pull_cols = ["Bug", "_ml_prob"] + (["Customer"] if "Customer" in df.columns else [])
-    bug_probs = df[pull_cols].rename(columns={"Bug": "Bug Id"})
-    dbugs = device_bugs.merge(bug_probs, on="Bug Id", how="left")
+    comp_col = "App Component Name"
+    master_bugs[comp_col] = master_bugs[comp_col].fillna("Unknown").replace("-", "Unknown")
 
-    # --- Step 4: aggregate per group ---
-    agg_dict = {
-        "ml_prob": ("_ml_prob", "mean"),
-        "n_bugs":  ("Bug Id",   "count"),
-    }
-    if sev_col:
-        agg_dict["n_critical"] = (sev_col, lambda x: (x == "Critical").sum())
-        agg_dict["n_high"]     = (sev_col, lambda x: (x == "High").sum())
-        agg_dict["n_medium"]   = (sev_col, lambda x: (x == "Medium").sum())
-        agg_dict["n_low"]      = (sev_col, lambda x: (x == "Low").sum())
+    def _top_value(s):
+        vc = s.value_counts()
+        return vc.index[0] if not vc.empty else "Unknown"
 
-    group_cols = [c for c in BUBBLE_GROUP_COLS if c in dbugs.columns]
     bug_agg = (
-        dbugs.groupby(group_cols)
-        .agg(**agg_dict)
+        master_bugs.groupby(["Customer", "Device"])
+        .agg(
+            Total_Bugs=("Bug Id", "count"),
+            Severity_Index=("Severity_Weight", "sum"),
+            Primary_Failing_Component=(comp_col, _top_value),
+        )
         .reset_index()
     )
 
-    # Fill groups where no bugdetails join matched with global baseline
-    global_baseline = df["_ml_prob"].mean()
-    bug_agg["ml_prob"] = bug_agg["ml_prob"].fillna(global_baseline)
-
-    # --- Step 5: failure rate from device test runs, joined with Customer from testcaseresults ---
+    # --- NODE B: run failure rate per (Customer, Device) ---
     try:
         tc_results = pd.read_excel(
             os.path.join(DATA_DIR, "testcaseresults.xlsx"), engine="openpyxl",
             usecols=["Test Run Result Id", "Customer"],
         )
-        device_runs = device_runs.merge(tc_results, on="Test Run Result Id", how="left")
+        master_runs = device_runs.merge(tc_results, on="Test Run Result Id", how="left")
     except Exception:
-        pass  # testcaseresults join is best-effort; Customer may be missing from run_agg
+        master_runs = device_runs.copy()
+        master_runs["Customer"] = np.nan
 
-    run_group_cols = [c for c in BUBBLE_GROUP_COLS if c in device_runs.columns]
-    run_totals = device_runs.groupby(run_group_cols).size().rename("n_runs")
-    run_fails  = device_runs[device_runs["Result Status"] == "Failed"].groupby(run_group_cols).size().rename("n_failed")
-    run_agg = pd.concat([run_totals, run_fails], axis=1).fillna(0).reset_index()
-    run_agg["failure_rate"] = run_agg["n_failed"] / run_agg["n_runs"].replace(0, np.nan)
-    run_agg["failure_rate"] = run_agg["failure_rate"].fillna(0.0)
-    run_agg = run_agg[run_group_cols + ["failure_rate", "n_runs", "n_failed"]]
+    run_group = ["Customer", "Device"] if "Customer" in master_runs.columns else ["Device"]
+    run_agg = (
+        master_runs.groupby(run_group)
+        .agg(
+            Total_Runs=("Result Status", "count"),
+            Failed_Runs=("Result Status", lambda x: (x == "Failed").sum()),
+        )
+        .reset_index()
+    )
+    run_agg["Historical_Failure_Rate"] = (
+        run_agg["Failed_Runs"] / run_agg["Total_Runs"].replace(0, 1)
+    )
 
-    # --- Step 6: merge on whichever group cols are present in both ---
-    merge_cols = [c for c in group_cols if c in run_agg.columns]
-    bubble = bug_agg.merge(run_agg, on=merge_cols, how="outer")
-    bubble["ml_prob"]     = bubble["ml_prob"].fillna(global_baseline)
-    bubble["failure_rate"]= bubble["failure_rate"].fillna(0.0)
-    bubble["n_bugs"]      = bubble["n_bugs"].fillna(0).astype(int)
-    for col in ["n_critical", "n_high", "n_medium", "n_low"]:
-        if col in bubble.columns:
-            bubble[col] = bubble[col].fillna(0).astype(int)
+    # --- ASSEMBLE ---
+    master_df = bug_agg.merge(run_agg, on=["Customer", "Device"], how="outer").fillna(0)
+    master_df["Predictive_Risk_Score"] = (
+        master_df["Historical_Failure_Rate"] * FAILURE_RATE_WEIGHT
+        + master_df["Severity_Index"] * BUG_WEIGHT
+    ).round(3)
 
-    # --- Step 7: KMeans clustering on (failure_rate, ml_prob) ---
-    n_clusters = min(3, len(bubble))
-    if n_clusters >= 2:
-        scaler = StandardScaler()
-        coords = scaler.fit_transform(bubble[["failure_rate", "ml_prob"]])
-        km = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
-        labels = km.fit_predict(coords)
+    # --- CLUSTER (rule-based) ---
+    def _cluster(row):
+        if row["Historical_Failure_Rate"] > FAILURE_RATE_THRESHOLD and row["Severity_Index"] > SEVERITY_THRESHOLD:
+            return "Critical Hotspot"
+        elif row["Historical_Failure_Rate"] > FAILURE_RATE_THRESHOLD:
+            return "Nuisance Zone (High Fail, Low Sev)"
+        elif row["Historical_Failure_Rate"] == 0 and row["Total_Bugs"] == 0:
+            return "Low ROI"
+        return "Stable Yielder"
 
-        centroid_scores = km.cluster_centers_[:, 0] + km.cluster_centers_[:, 1]
-        rank = centroid_scores.argsort().argsort()  # 0=lowest … 2=highest
+    master_df["Optimization_Cluster"] = master_df.apply(_cluster, axis=1)
+    master_df["Cluster_Color"] = master_df["Optimization_Cluster"].map(CLUSTER_COLORS).fillna("#aec7e8")
 
-        bubble["cluster"] = [CLUSTER_NAMES.get(rank[l], "Unknown") for l in labels]
-    else:
-        bubble["cluster"] = "Stable"
-
-    bubble["cluster_color"] = bubble["cluster"].map(CLUSTER_COLORS).fillna("#aec7e8")
+    bubble = (
+        master_df[master_df["Predictive_Risk_Score"] > 0]
+        .sort_values("Predictive_Risk_Score", ascending=False)
+        .reset_index(drop=True)
+    )
     return bubble
 
 
@@ -542,9 +533,9 @@ def main():
     print("Training classifier...")
     clf, feature_info = train_classifier(df)
 
-    print("Computing bubble map data...")
-    bubble_data = compute_bubble_data(df, clf, feature_info)
-    print(f"  {len(bubble_data):,} bubbles  |  clusters: {bubble_data['cluster'].value_counts().to_dict()}")
+    print("Computing bubble map data (QA Predictive Radar)...")
+    bubble_data = compute_bubble_data(df)
+    print(f"  {len(bubble_data):,} device bubbles  |  clusters: {bubble_data['Optimization_Cluster'].value_counts().to_dict()}")
 
     joblib.dump(clf,            os.path.join(ARTIFACTS_DIR, "classifier.joblib"))
     joblib.dump(risk_tables,    os.path.join(ARTIFACTS_DIR, "risk_tables.joblib"))

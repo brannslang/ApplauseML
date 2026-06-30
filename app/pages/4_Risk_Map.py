@@ -3,7 +3,7 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 import streamlit as st
-import plotly.graph_objects as go
+import plotly.express as px
 import pandas as pd
 
 from model.predict import get_bubble_data
@@ -15,21 +15,20 @@ st.set_page_config(
     layout="wide",
 )
 
-st.title("Interactive Risk Map")
+st.title("QA Predictive Radar")
 st.caption(
-    "Each bubble is a Device OS × App Component combination. "
-    "X-axis = historical test case failure rate. "
-    "Y-axis = ML-predicted High/Critical bug probability. "
-    "Bubble size = risk score (larger = higher risk)."
+    "Device-level risk map. "
+    "X = historical test case failure rate. "
+    "Y = weighted bug severity score (Critical=4, High=3, Med=2, Low=1). "
+    "Bubble size = Predictive Risk Score = (failure rate × 50) + (severity × 10)."
 )
 
-customer  = require_customer()
+customer    = require_customer()
 all_bubbles = get_bubble_data()
 
 if all_bubbles.empty:
     st.warning(
-        "Bubble data not yet generated. "
-        "Retrain the model with `python model/train.py` to produce it.",
+        "Bubble data not yet generated. Retrain with `python model/train.py`.",
         icon="⚠️",
     )
     st.stop()
@@ -40,233 +39,131 @@ else:
     bubble_df = all_bubbles.copy()
 
 if bubble_df.empty:
-    st.warning(f"No bubble data found for **{customer}**. The customer may not appear in the device-level datasets.")
+    st.warning(f"No device-level data found for **{customer}**.")
     st.stop()
 
 st.subheader(f"Customer: {customer}")
 
 CLUSTER_COLORS = {
-    "Critical Hazard": "#d62728",
-    "Nuisance Zone":   "#ff7f0e",
-    "Stable":          "#2ca02c",
+    "Critical Hotspot":                   "red",
+    "Nuisance Zone (High Fail, Low Sev)": "orange",
+    "Stable Yielder":                     "green",
+    "Low ROI":                            "lightgray",
 }
 
-st.divider()
-
-# ── Filters ──────────────────────────────────────────────────────────────────
+# ── Sidebar filters ───────────────────────────────────────────────────────────
 with st.sidebar:
     st.header("Filters")
 
-    platforms = sorted(bubble_df["Platform Product Name"].dropna().unique().tolist())
-    selected_platforms = st.multiselect(
-        "Platform",
-        options=platforms,
-        default=platforms,
-    )
+    clusters = sorted(bubble_df["Optimization_Cluster"].dropna().unique().tolist())
+    selected_clusters = st.multiselect("Risk Cluster", clusters, default=clusters)
 
-    os_versions = sorted(bubble_df["Mobile OS Major Version"].dropna().unique().tolist())
-    selected_os = st.multiselect(
-        "OS Version",
-        options=os_versions,
-        default=os_versions,
-    )
-
-    min_bugs = st.slider(
-        "Minimum bug count (hide sparse bubbles)",
-        min_value=1,
-        max_value=int(bubble_df["n_bugs"].quantile(0.90)),
-        value=5,
+    max_score = int(bubble_df["Predictive_Risk_Score"].max())
+    min_score = st.slider(
+        "Minimum Risk Score",
+        min_value=0,
+        max_value=max(max_score, 1),
+        value=0,
         step=1,
+        help="Hide devices below this Predictive Risk Score.",
     )
 
-    clusters = sorted(bubble_df["cluster"].dropna().unique().tolist())
-    selected_clusters = st.multiselect(
-        "Risk Cluster",
-        options=clusters,
-        default=clusters,
-    )
+    st.divider()
 
 # ── Apply filters ─────────────────────────────────────────────────────────────
 filtered = bubble_df[
-    bubble_df["Platform Product Name"].isin(selected_platforms)
-    & bubble_df["Mobile OS Major Version"].isin(selected_os)
-    & bubble_df["n_bugs"].ge(min_bugs)
-    & bubble_df["cluster"].isin(selected_clusters)
+    bubble_df["Optimization_Cluster"].isin(selected_clusters)
+    & bubble_df["Predictive_Risk_Score"].ge(min_score)
 ].copy()
 
 if filtered.empty:
-    st.info("No data matches the current filters. Adjust the sidebar filters.")
+    st.info("No devices match the current filters.")
     st.stop()
 
 # ── Summary metrics ───────────────────────────────────────────────────────────
-col1, col2, col3, col4 = st.columns(4)
-col1.metric("Bubbles shown", f"{len(filtered):,}")
-col2.metric(
-    "Critical Hazard",
-    f"{(filtered['cluster'] == 'Critical Hazard').sum()}",
-)
-col3.metric(
-    "Nuisance Zone",
-    f"{(filtered['cluster'] == 'Nuisance Zone').sum()}",
-)
-col4.metric(
-    "Stable",
-    f"{(filtered['cluster'] == 'Stable').sum()}",
-)
+m1, m2, m3, m4 = st.columns(4)
+m1.metric("Devices shown", f"{len(filtered):,}")
+m2.metric("Critical Hotspots",  str((filtered["Optimization_Cluster"] == "Critical Hotspot").sum()))
+m3.metric("Nuisance Zone",      str((filtered["Optimization_Cluster"] == "Nuisance Zone (High Fail, Low Sev)").sum()))
+m4.metric("Stable Yielders",    str((filtered["Optimization_Cluster"] == "Stable Yielder").sum()))
 
 st.divider()
 
-# ── Build bubble chart ────────────────────────────────────────────────────────
-SIZE_SCALE = 60  # max pixel diameter
+# ── Bubble chart ──────────────────────────────────────────────────────────────
+hover_cols = {"Primary_Failing_Component": True, "Total_Bugs": True, "Total_Runs": True, "Predictive_Risk_Score": True}
+# Only include columns that exist
+hover_cols = {k: v for k, v in hover_cols.items() if k in filtered.columns}
 
-
-def build_hover(row) -> str:
-    lines = [
-        f"<b>{row['App Component Name']}</b>",
-        f"Platform: {row['Platform Product Name']}",
-        f"OS: {row['Mobile OS Major Version']}",
-        f"<br>ML Risk Score: {row['ml_prob']:.1%}",
-        f"Test Failure Rate: {row['failure_rate']:.1%}",
-        f"Total Bugs: {int(row['n_bugs'])}",
-        f"Cluster: {row['cluster']}",
-    ]
-    sev_parts = []
-    for col, label in [("n_critical", "Critical"), ("n_high", "High"),
-                       ("n_medium", "Medium"), ("n_low", "Low")]:
-        if col in row.index and row[col] > 0:
-            sev_parts.append(f"{label}: {int(row[col])}")
-    if sev_parts:
-        lines.append("<br>Severity: " + " | ".join(sev_parts))
-    return "<br>".join(lines)
-
-
-fig = go.Figure()
-
-for cluster_name, color in CLUSTER_COLORS.items():
-    subset = filtered[filtered["cluster"] == cluster_name]
-    if subset.empty:
-        continue
-
-    max_prob = filtered["ml_prob"].max() or 1.0
-    sizes = (subset["ml_prob"] / max_prob * SIZE_SCALE).clip(lower=6)
-
-    hover_texts = [build_hover(row) for _, row in subset.iterrows()]
-
-    fig.add_trace(
-        go.Scatter(
-            x=subset["failure_rate"],
-            y=subset["ml_prob"],
-            mode="markers",
-            name=cluster_name,
-            marker=dict(
-                size=sizes,
-                color=color,
-                opacity=0.75,
-                line=dict(width=1, color="white"),
-            ),
-            text=hover_texts,
-            hovertemplate="%{text}<extra></extra>",
-            customdata=subset[["App Component Name", "Platform Product Name",
-                               "Mobile OS Major Version"]].values,
-        )
-    )
-
-# Quadrant reference lines
-x_mid = filtered["failure_rate"].median()
-y_mid = filtered["ml_prob"].median()
-
-fig.add_hline(
-    y=y_mid,
-    line_dash="dot",
-    line_color="gray",
-    opacity=0.5,
-    annotation_text=f"Median risk ({y_mid:.0%})",
-    annotation_position="top left",
-    annotation_font_size=11,
-)
-fig.add_vline(
-    x=x_mid,
-    line_dash="dot",
-    line_color="gray",
-    opacity=0.5,
-    annotation_text=f"Median failure rate ({x_mid:.0%})",
-    annotation_position="top right",
-    annotation_font_size=11,
+fig = px.scatter(
+    filtered,
+    x="Historical_Failure_Rate",
+    y="Severity_Index",
+    size="Predictive_Risk_Score",
+    color="Optimization_Cluster",
+    hover_name="Device",
+    hover_data=hover_cols,
+    title=f"QA Predictive Radar — {customer}",
+    labels={
+        "Historical_Failure_Rate": "Historical Failure Probability (%)",
+        "Severity_Index":          "Weighted Bug Severity Score",
+        "Optimization_Cluster":    "Risk Cluster",
+    },
+    size_max=50,
+    color_discrete_map=CLUSTER_COLORS,
+    template="plotly_dark",
 )
 
 fig.update_layout(
-    xaxis=dict(
-        title="Test Case Failure Rate",
-        tickformat=".0%",
-        range=[-0.02, min(1.05, filtered["failure_rate"].max() * 1.15)],
-        gridcolor="#eeeeee",
-    ),
-    yaxis=dict(
-        title="ML Risk Score — P(High/Critical Bug)",
-        tickformat=".0%",
-        range=[-0.02, min(1.05, filtered["ml_prob"].max() * 1.15)],
-        gridcolor="#eeeeee",
-    ),
+    xaxis_tickformat=".0%",
+    height=600,
     legend=dict(
         title="Risk Cluster",
         orientation="h",
         yanchor="bottom",
-        y=-0.18,
+        y=-0.22,
         xanchor="center",
         x=0.5,
     ),
-    height=620,
-    plot_bgcolor="white",
-    paper_bgcolor="white",
-    margin=dict(t=30, b=80, l=60, r=40),
-    hovermode="closest",
+    margin=dict(t=60, b=80, l=60, r=40),
 )
 
 st.plotly_chart(fig, use_container_width=True)
 
-# ── Quadrant labels ───────────────────────────────────────────────────────────
-q1, q2, q3, q4 = st.columns(4)
-q1.markdown("↖ **Low failure / Low risk** — generally healthy")
-q2.markdown("↗ **High failure / Low risk** — test coverage issues, low severity bugs")
-q3.markdown("↙ **Low failure / High risk** — rare but severe when bugs appear")
-q4.markdown("↘ **High failure / High risk** — Critical Hazard zone, prioritise immediately")
+# ── Cluster legend ────────────────────────────────────────────────────────────
+c1, c2, c3, c4 = st.columns(4)
+c1.markdown("🔴 **Critical Hotspot** — failure >10% AND severity >10. Prioritise immediately.")
+c2.markdown("🟡 **Nuisance Zone** — failure >10% but low severity. Test volume issue.")
+c3.markdown("🟢 **Stable Yielder** — healthy device / component combination.")
+c4.markdown("⚪ **Low ROI** — zero failures and zero bugs. Consider removing from matrix.")
 
 st.divider()
 
 # ── Detail table ──────────────────────────────────────────────────────────────
 with st.expander("View underlying data table"):
     display_cols = [
-        "App Component Name",
-        "Platform Product Name",
-        "Mobile OS Major Version",
-        "cluster",
-        "ml_prob",
-        "failure_rate",
-        "n_bugs",
+        "Device", "Optimization_Cluster", "Predictive_Risk_Score",
+        "Historical_Failure_Rate", "Severity_Index",
+        "Total_Bugs", "Total_Runs", "Failed_Runs",
     ]
-    for col in ["n_critical", "n_high", "n_medium", "n_low"]:
-        if col in filtered.columns:
-            display_cols.append(col)
+    if "Primary_Failing_Component" in filtered.columns:
+        display_cols.insert(2, "Primary_Failing_Component")
+
+    display_cols = [c for c in display_cols if c in filtered.columns]
 
     st.dataframe(
         filtered[display_cols]
         .rename(columns={
-            "App Component Name":        "Component",
-            "Platform Product Name":     "Platform",
-            "Mobile OS Major Version":   "OS Version",
-            "cluster":                   "Cluster",
-            "ml_prob":                   "ML Risk Score",
-            "failure_rate":              "Failure Rate",
-            "n_bugs":                    "Bug Count",
-            "n_critical":                "Critical",
-            "n_high":                    "High",
-            "n_medium":                  "Medium",
-            "n_low":                     "Low",
+            "Optimization_Cluster":    "Cluster",
+            "Predictive_Risk_Score":   "Risk Score",
+            "Historical_Failure_Rate": "Failure Rate",
+            "Severity_Index":          "Severity Score",
+            "Primary_Failing_Component": "Top Failing Component",
         })
-        .sort_values("ML Risk Score", ascending=False)
+        .sort_values("Risk Score", ascending=False)
         .style.format({
-            "ML Risk Score": "{:.1%}",
-            "Failure Rate":  "{:.1%}",
+            "Failure Rate":   "{:.1%}",
+            "Severity Score": "{:.1f}",
+            "Risk Score":     "{:.1f}",
         }),
         use_container_width=True,
     )
