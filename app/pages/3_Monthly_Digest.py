@@ -14,7 +14,7 @@ st.set_page_config(page_title="Monthly Digest — ApplauseML", page_icon="📅",
 st.title("Monthly Digest")
 st.caption(
     "Historical pattern analysis — trends, top risk factors, and period-over-period changes. "
-    "Refresh by rerunning `python model/train.py`."
+    "Refresh from the **Data Upload** page."
 )
 
 customer = require_customer()

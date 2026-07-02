@@ -56,6 +56,22 @@ def artifacts_exist() -> bool:
     return os.path.exists(os.path.join(ARTIFACTS_DIR, "classifier.joblib"))
 
 
+def reset_cache() -> None:
+    """Drop in-memory artifacts so the next call re-reads from disk. Call
+    this after retraining so a running Streamlit process picks up the new
+    model/risk tables/customer roster without needing a restart."""
+    global _model, _risk_tables, _feature_info
+    global _text_pipeline, _text_profiles, _nmf_model, _graph_artifacts, _sentence_model
+    _model = None
+    _risk_tables = None
+    _feature_info = None
+    _text_pipeline = None
+    _text_profiles = None
+    _nmf_model = None
+    _graph_artifacts = None
+    _sentence_model = None
+
+
 def get_risk_tables() -> dict:
     _load()
     return _risk_tables

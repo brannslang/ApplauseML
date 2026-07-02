@@ -15,7 +15,7 @@ def require_customer() -> str:
     from model.predict import artifacts_exist, get_customers
 
     if not artifacts_exist():
-        st.error("Model artifacts not found. Run `python model/train.py` first.")
+        st.error("Model artifacts not found. Upload data from the **Data Upload** page to train the model.")
         st.stop()
 
     customers = get_customers()

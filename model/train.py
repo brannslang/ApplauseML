@@ -300,13 +300,44 @@ def _risk_tables_for(df: pd.DataFrame) -> dict:
     return tables
 
 
-def compute_risk_tables(df: pd.DataFrame) -> dict:
+def load_customer_roster(bug_customers: set = None) -> list:
+    """
+    Master customer list for the dashboard selector.
+
+    Entitlements are the source of truth: every customer must have an
+    entitlement to run any testing, whereas plenty of customers (e.g.
+    UX-feedback-only engagements) never generate a row in bugdetails.xlsx.
+    Customers found in bug data are unioned in as a safety net so a
+    customer already visible in the dashboard never disappears because of
+    a gap in the entitlement extract.
+    """
+    roster = set()
+
+    ed_path = os.path.join(DATA_DIR, "entitlementdetails.xlsx")
+    if os.path.exists(ed_path):
+        ed = pd.read_excel(ed_path, engine="openpyxl", usecols=["Customer Name"])
+        roster |= set(ed["Customer Name"].dropna().unique())
+
+    tce_path = os.path.join(DATA_DIR, "testcaseentitlements.xlsx")
+    if os.path.exists(tce_path):
+        tce = pd.read_excel(tce_path, engine="openpyxl", usecols=["Customer"])
+        roster |= set(tce["Customer"].dropna().unique())
+
+    if bug_customers:
+        roster |= set(bug_customers)
+
+    return sorted(roster)
+
+
+def compute_risk_tables(df: pd.DataFrame, customer_roster: list = None) -> dict:
     tables = _risk_tables_for(df)
 
-    customers = []
+    has_customer_col = "Customer" in df.columns
+    bug_customers = sorted(df["Customer"].dropna().unique().tolist()) if has_customer_col else []
+    customers = customer_roster if customer_roster is not None else bug_customers
+
     by_customer = {}
-    if "Customer" in df.columns:
-        customers = sorted(df["Customer"].dropna().unique().tolist())
+    if has_customer_col:
         for customer in customers:
             subset = df[df["Customer"] == customer]
             if len(subset) >= MIN_BUGS_FOR_TABLE:
@@ -526,8 +557,13 @@ def main():
     df = pd.concat([df, graph_features], axis=1)
     print(f"  {len(graph_artifacts['node_metrics'])} graph nodes  |  {len(graph_features.columns)} graph feature columns added")
 
+    print("Loading customer roster from entitlements...")
+    bug_customers = set(df["Customer"].dropna().unique()) if "Customer" in df.columns else set()
+    customer_roster = load_customer_roster(bug_customers)
+    print(f"  {len(customer_roster)} customers ({len(bug_customers)} with bug data)")
+
     print("Computing risk tables...")
-    risk_tables = compute_risk_tables(df)
+    risk_tables = compute_risk_tables(df, customer_roster=customer_roster)
     print(f"  {len(risk_tables) - 2} dimension tables built")
 
     print("Training classifier...")
