@@ -48,10 +48,19 @@ with col3:
 
 st.divider()
 
+st.subheader("Data Upload")
+st.markdown(
+    "Upload refreshed or new client Excel files and retrain the model — no command line needed."
+)
+if st.button("Open Data Upload →", use_container_width=True):
+    st.switch_page("pages/5_Data_Upload.py")
+
+st.divider()
+
 from model.predict import artifacts_exist
 if not artifacts_exist():
     st.warning(
-        "Model artifacts not found. Run `python model/train.py` from the repo root "
+        "Model artifacts not found. Upload data from the **Data Upload** page "
         "to train the model before using the predictor.",
         icon="⚠️",
     )

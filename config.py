@@ -22,6 +22,20 @@ NUMERIC_FEATURES = [
 TARGET = "is_high_crit"
 MIN_BUGS_FOR_TABLE = 10
 
+# Standardized filenames the training pipeline and the data uploader both
+# recognize. Uploading a subset is fine — only the matching files get
+# replaced and everything else in DATA_DIR is left as-is.
+EXPECTED_DATA_FILES = [
+    "bugdetails.xlsx",
+    "testcycles.xlsx",
+    "devicebugs.xlsx",
+    "devicetestruns.xlsx",
+    "testcaseresults.xlsx",
+    "testcasedetails.xlsx",
+    "testcaseentitlements.xlsx",
+    "entitlementdetails.xlsx",
+]
+
 # --- Multi-modal enrichment constants ---
 
 N_SVD_COMPONENTS = 25

@@ -28,7 +28,7 @@ all_bubbles = get_bubble_data()
 
 if all_bubbles.empty:
     st.warning(
-        "Bubble data not yet generated. Retrain with `python model/train.py`.",
+        "Bubble data not yet generated. Retrain from the **Data Upload** page.",
         icon="⚠️",
     )
     st.stop()
